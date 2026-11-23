@@ -11,7 +11,7 @@ import os
 from typing import Dict, Any
 import logging
 
-from .step_processor import STEPProcessor
+from step_processor import STEPProcessor
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
