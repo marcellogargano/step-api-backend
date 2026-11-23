@@ -23,4 +23,4 @@ ENV PYTHONUNBUFFERED=1
 ENV MAMBA_DOCKERFILE_ACTIVATE=1
 
 # Activate environment and run
-CMD ["/usr/local/bin/_dockerfile_shell.sh", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["micromamba", "run", "-n", "base", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
