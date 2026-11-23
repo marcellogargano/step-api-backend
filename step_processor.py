@@ -23,6 +23,7 @@ try:
     )
     from OCC.Core.Bnd import Bnd_Box
     from OCC.Core.BRepBndLib import brepbndlib_Add
+    from OCC.Core.BRep import BRep_Tool
     from OCC.Core.BRepCheck import BRepCheck_Analyzer
     from OCC.Core.TopoDS import TopoDS_Shape, TopoDS_Compound
     from OCC.Core.TopTools import TopTools_IndexedMapOfShape
@@ -285,7 +286,7 @@ class STEPProcessor:
             # Check for degenerate edges
             degenerate_count = 0
             for edge in explorer.edges():
-                if edge.Degenerated():
+                if BRep_Tool.Degenerated(edge):
                     degenerate_count += 1
             
             if degenerate_count > 0:
