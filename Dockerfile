@@ -23,4 +23,4 @@ ENV PYTHONUNBUFFERED=1
 ENV MAMBA_DOCKERFILE_ACTIVATE=1
 
 # Activate environment and run
-CMD ["micromamba", "run", "-n", "base", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["micromamba", "run", "-n", "base", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
