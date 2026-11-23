@@ -9,7 +9,7 @@ WORKDIR /app
 COPY environment.yml .
 
 # Create environment using micromamba (faster and more reliable)
-RUN micromamba create -f environment.yml && \
+RUN micromamba install -y -n base -f environment.yml && \
     micromamba clean --all --yes
 
 # Copy application code
