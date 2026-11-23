@@ -13,7 +13,7 @@ RUN micromamba create -f environment.yml && \
     micromamba clean --all --yes
 
 # Copy application code
-COPY ./app /app/app
+COPY . /app
 
 # Expose port
 EXPOSE 8000
