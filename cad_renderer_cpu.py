@@ -1,5 +1,5 @@
 """
-CPU CAD renderer.
+Memory-efficient CPU CAD renderer.
 
 Geometry comes exclusively from the real Open CASCADE B-Rep.
 No OpenGL, VTK, OSMesa or GPU rendering is used.
@@ -8,7 +8,7 @@ Open CASCADE:
     STEP -> TopoDS_Shape -> BRepMesh triangulation
 
 CPU renderer:
-    3D vertices -> orthographic projection -> SVG
+    3D vertices -> orthographic projection -> compact NumPy arrays -> SVG
 
 B-Rep face IDs remain consistent with /analyze/faces.
 """
@@ -17,6 +17,8 @@ import logging
 import math
 import os
 from typing import List, Optional, Tuple
+
+import numpy as np
 
 from OCC.Core.BRep import BRep_Tool
 from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
@@ -34,7 +36,7 @@ logger = logging.getLogger(__name__)
 def _normalize(
     vector: List[float]
 ) -> Tuple[float, float, float]:
-    """Normalize a 3D vector."""
+    """Normalize a three-dimensional vector."""
 
     if len(vector) != 3:
         raise ValueError(
@@ -46,7 +48,9 @@ def _normalize(
     z = float(vector[2])
 
     magnitude = math.sqrt(
-        x * x + y * y + z * z
+        x * x +
+        y * y +
+        z * z
     )
 
     if magnitude < 1.0e-12:
@@ -62,7 +66,7 @@ def _normalize(
 
 
 def _cross(a, b):
-    """Cross product."""
+    """Cross product of two three-dimensional vectors."""
 
     return (
         a[1] * b[2] - a[2] * b[1],
@@ -72,12 +76,12 @@ def _cross(a, b):
 
 
 def _dot(a, b):
-    """Dot product."""
+    """Dot product of two three-dimensional vectors."""
 
     return (
-        a[0] * b[0]
-        + a[1] * b[1]
-        + a[2] * b[2]
+        a[0] * b[0] +
+        a[1] * b[1] +
+        a[2] * b[2]
     )
 
 
@@ -85,16 +89,14 @@ def _validate_color(
     value: str,
     name: str
 ) -> str:
-    """Validate #RRGGBB color."""
+    """Validate and normalize a hexadecimal color."""
 
     value = value.strip().upper()
 
-    if len(value) != 7:
-        raise ValueError(
-            "{} must use #RRGGBB format".format(name)
-        )
-
-    if not value.startswith("#"):
+    if (
+        len(value) != 7
+        or not value.startswith("#")
+    ):
         raise ValueError(
             "{} must use #RRGGBB format".format(name)
         )
@@ -110,82 +112,12 @@ def _validate_color(
     return value
 
 
-def render_step_svg(
+def _read_and_mesh_step(
     file_path: str,
-    output_path: str,
-    view_direction: List[float],
-    up_direction: List[float],
-    highlight_faces: Optional[List[str]] = None,
-    highlight_color: str = "#FF0000",
-    base_color: str = "#BFC5CC",
-    edge_color: str = "#202020",
-    background_color: str = "#FFFFFF",
-    width: int = 1600,
-    height: int = 1000,
-    linear_deflection: float = 1.0,
-    angular_deflection: float = 0.35
-) -> str:
-    """
-    Generate an orthographic SVG projection from a STEP B-Rep.
-
-    Geometry and triangulation come from Open CASCADE.
-
-    Face IDs follow the same TopExp traversal used by
-    /analyze/faces.
-    """
-
-    # ---------------------------------------------------------
-    # INPUT VALIDATION
-    # ---------------------------------------------------------
-
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(
-            "STEP file not found: {}".format(file_path)
-        )
-
-    if width < 200:
-        raise ValueError(
-            "Width must be at least 200 pixels"
-        )
-
-    if height < 200:
-        raise ValueError(
-            "Height must be at least 200 pixels"
-        )
-
-    if linear_deflection <= 0:
-        raise ValueError(
-            "linear_deflection must be greater than zero"
-        )
-
-    if angular_deflection <= 0:
-        raise ValueError(
-            "angular_deflection must be greater than zero"
-        )
-
-    highlight_color = _validate_color(
-        highlight_color,
-        "highlight_color"
-    )
-
-    base_color = _validate_color(
-        base_color,
-        "base_color"
-    )
-
-    edge_color = _validate_color(
-        edge_color,
-        "edge_color"
-    )
-
-    background_color = _validate_color(
-        background_color,
-        "background_color"
-    )
-
-    # ---------------------------------------------------------
-    # READ STEP
-    # ---------------------------------------------------------
+    linear_deflection: float,
+    angular_deflection: float
+):
+    """Read and triangulate the STEP B-Rep with Open CASCADE."""
 
     logger.info(
         "CPU RENDER 1: reading STEP"
@@ -202,7 +134,9 @@ def render_step_svg(
             "Open CASCADE STEP read failed"
         )
 
-    transferred_roots = reader.TransferRoots()
+    transferred_roots = (
+        reader.TransferRoots()
+    )
 
     if transferred_roots <= 0:
         raise RuntimeError(
@@ -219,10 +153,6 @@ def render_step_svg(
     logger.info(
         "CPU RENDER 2: STEP loaded"
     )
-
-    # ---------------------------------------------------------
-    # OPEN CASCADE B-REP MESH
-    # ---------------------------------------------------------
 
     logger.info(
         "CPU RENDER 3: starting BRep meshing"
@@ -245,6 +175,110 @@ def render_step_svg(
 
     logger.info(
         "CPU RENDER 4: BRep meshing completed"
+    )
+
+    return shape
+
+
+def _count_triangles(shape) -> int:
+    """Count all triangles without storing them in Python objects."""
+
+    triangle_count = 0
+
+    explorer = TopExp_Explorer(
+        shape,
+        TopAbs_FACE
+    )
+
+    while explorer.More():
+
+        face = topods.Face(
+            explorer.Current()
+        )
+
+        location = TopLoc_Location()
+
+        triangulation = BRep_Tool.Triangulation(
+            face,
+            location
+        )
+
+        if triangulation is not None:
+            triangle_count += (
+                triangulation.NbTriangles()
+            )
+
+        explorer.Next()
+
+    return triangle_count
+
+
+def render_step_svg(
+    file_path: str,
+    output_path: str,
+    view_direction: List[float],
+    up_direction: List[float],
+    highlight_faces: Optional[List[str]] = None,
+    highlight_color: str = "#FF0000",
+    base_color: str = "#BFC5CC",
+    edge_color: str = "#202020",
+    background_color: str = "#FFFFFF",
+    width: int = 1600,
+    height: int = 1000,
+    linear_deflection: float = 1.0,
+    angular_deflection: float = 0.35
+) -> str:
+    """
+    Generate an orthographic SVG projection from a STEP B-Rep.
+
+    Geometry and triangulation come from Open CASCADE.
+    Compact NumPy arrays are used to limit memory consumption.
+    """
+
+    # ---------------------------------------------------------
+    # INPUT VALIDATION
+    # ---------------------------------------------------------
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(
+            "STEP file not found: {}".format(
+                file_path
+            )
+        )
+
+    if width < 200 or height < 200:
+        raise ValueError(
+            "SVG width and height must be at least 200 pixels"
+        )
+
+    if linear_deflection <= 0:
+        raise ValueError(
+            "linear_deflection must be greater than zero"
+        )
+
+    if angular_deflection <= 0:
+        raise ValueError(
+            "angular_deflection must be greater than zero"
+        )
+
+    highlight_color = _validate_color(
+        highlight_color,
+        "highlight_color"
+    )
+
+    base_color = _validate_color(
+        base_color,
+        "base_color"
+    )
+
+    _validate_color(
+        edge_color,
+        "edge_color"
+    )
+
+    background_color = _validate_color(
+        background_color,
+        "background_color"
     )
 
     # ---------------------------------------------------------
@@ -290,31 +324,77 @@ def render_step_svg(
     )
 
     # ---------------------------------------------------------
-    # HIGHLIGHTED FACE IDs
+    # FACE SELECTION
     # ---------------------------------------------------------
 
-    highlight_set = set()
-
-    if highlight_faces:
-
-        for face_id in highlight_faces:
-
-            clean_face_id = (
-                str(face_id)
-                .strip()
-                .upper()
-            )
-
-            if clean_face_id:
-                highlight_set.add(
-                    clean_face_id
-                )
+    highlight_set = {
+        str(face_id).strip().upper()
+        for face_id in (
+            highlight_faces or []
+        )
+        if str(face_id).strip()
+    }
 
     # ---------------------------------------------------------
-    # EXTRACT AND PROJECT TRIANGLES
+    # READ AND MESH STEP
     # ---------------------------------------------------------
 
-    triangles = []
+    shape = _read_and_mesh_step(
+        file_path,
+        linear_deflection,
+        angular_deflection
+    )
+
+    # ---------------------------------------------------------
+    # COUNT TRIANGLES
+    # ---------------------------------------------------------
+
+    logger.info(
+        "CPU RENDER 5: counting B-Rep triangles"
+    )
+
+    triangle_count = _count_triangles(
+        shape
+    )
+
+    if triangle_count <= 0:
+        raise RuntimeError(
+            "Open CASCADE did not generate any display triangles"
+        )
+
+    # ---------------------------------------------------------
+    # ALLOCATE COMPACT ARRAYS
+    # ---------------------------------------------------------
+
+    logger.info(
+        "CPU RENDER 6: allocating compact arrays "
+        "for {} triangles".format(
+            triangle_count
+        )
+    )
+
+    points = np.empty(
+        (
+            triangle_count,
+            3,
+            2
+        ),
+        dtype=np.float32
+    )
+
+    depths = np.empty(
+        triangle_count,
+        dtype=np.float32
+    )
+
+    highlighted = np.zeros(
+        triangle_count,
+        dtype=np.uint8
+    )
+
+    # ---------------------------------------------------------
+    # PROJECTED EXTENTS
+    # ---------------------------------------------------------
 
     projected_x_min = float("inf")
     projected_x_max = float("-inf")
@@ -322,21 +402,26 @@ def render_step_svg(
     projected_y_min = float("inf")
     projected_y_max = float("-inf")
 
-    face_explorer = TopExp_Explorer(
+    # ---------------------------------------------------------
+    # PROJECT TRIANGLES
+    # ---------------------------------------------------------
+
+    explorer = TopExp_Explorer(
         shape,
         TopAbs_FACE
     )
 
     face_index = 1
+    write_index = 0
 
     logger.info(
-        "CPU RENDER 5: extracting B-Rep face triangulations"
+        "CPU RENDER 7: extracting projected triangles"
     )
 
-    while face_explorer.More():
+    while explorer.More():
 
         face = topods.Face(
-            face_explorer.Current()
+            explorer.Current()
         )
 
         face_id = "FACE_{}".format(
@@ -345,11 +430,9 @@ def render_step_svg(
 
         location = TopLoc_Location()
 
-        triangulation = (
-            BRep_Tool.Triangulation(
-                face,
-                location
-            )
+        triangulation = BRep_Tool.Triangulation(
+            face,
+            location
         )
 
         if triangulation is not None:
@@ -364,17 +447,17 @@ def render_step_svg(
             )
 
             if face_id in highlight_set:
-                face_color = highlight_color
+                is_highlighted = 1
             else:
-                face_color = base_color
+                is_highlighted = 0
 
-            number_of_triangles = (
+            triangle_total = (
                 triangulation.NbTriangles()
             )
 
             for triangle_index in range(
                 1,
-                number_of_triangles + 1
+                triangle_total + 1
             ):
 
                 triangle = (
@@ -388,20 +471,21 @@ def render_step_svg(
                 )
 
                 if reversed_face:
-
                     node_2, node_3 = (
                         node_3,
                         node_2
                     )
 
-                projected_points = []
-
                 depth_sum = 0.0
 
-                for node_index in (
+                node_indices = (
                     node_1,
                     node_2,
                     node_3
+                )
+
+                for local_index, node_index in enumerate(
+                    node_indices
                 ):
 
                     point = (
@@ -433,12 +517,17 @@ def render_step_svg(
                         view
                     )
 
-                    projected_points.append(
-                        (
-                            projected_x,
-                            projected_y
-                        )
-                    )
+                    points[
+                        write_index,
+                        local_index,
+                        0
+                    ] = projected_x
+
+                    points[
+                        write_index,
+                        local_index,
+                        1
+                    ] = projected_y
 
                     depth_sum += (
                         projected_depth
@@ -464,32 +553,49 @@ def render_step_svg(
                         projected_y
                     )
 
-                triangles.append(
-                    {
-                        "face_id": face_id,
-                        "points": projected_points,
-                        "depth": depth_sum / 3.0,
-                        "color": face_color
-                    }
-                )
+                depths[
+                    write_index
+                ] = depth_sum / 3.0
+
+                highlighted[
+                    write_index
+                ] = is_highlighted
+
+                write_index += 1
 
         face_index += 1
 
-        face_explorer.Next()
+        explorer.Next()
 
-    if len(triangles) == 0:
+    if write_index <= 0:
         raise RuntimeError(
-            "Open CASCADE did not generate any display triangles"
+            "No projected B-Rep triangles were extracted"
         )
 
+    if write_index != triangle_count:
+
+        points = points[
+            :write_index
+        ]
+
+        depths = depths[
+            :write_index
+        ]
+
+        highlighted = highlighted[
+            :write_index
+        ]
+
+        triangle_count = write_index
+
     logger.info(
-        "CPU RENDER 6: extracted {} triangles".format(
-            len(triangles)
+        "CPU RENDER 8: extracted {} triangles".format(
+            triangle_count
         )
     )
 
     # ---------------------------------------------------------
-    # PROJECTED EXTENTS
+    # PROJECTED MODEL DIMENSIONS
     # ---------------------------------------------------------
 
     projected_width = (
@@ -513,7 +619,7 @@ def render_step_svg(
         )
 
     # ---------------------------------------------------------
-    # FIT PROJECTION INTO SVG CANVAS
+    # FIT INTO SVG CANVAS
     # ---------------------------------------------------------
 
     margin = 40.0
@@ -565,50 +671,45 @@ def render_step_svg(
         - rendered_height
     ) / 2.0
 
-    def image_coordinates(
-        projected_x,
-        projected_y
-    ):
+    # Convert projected coordinates directly in compact arrays.
 
-        image_x = (
-            x_offset
+    points[:, :, 0] = (
+        x_offset
+        + (
+            points[:, :, 0]
+            - projected_x_min
+        ) * scale
+    )
+
+    points[:, :, 1] = (
+        float(height)
+        - (
+            y_offset
             + (
-                projected_x
-                - projected_x_min
+                points[:, :, 1]
+                - projected_y_min
             ) * scale
         )
-
-        image_y = (
-            float(height)
-            - (
-                y_offset
-                + (
-                    projected_y
-                    - projected_y_min
-                ) * scale
-            )
-        )
-
-        return (
-            image_x,
-            image_y
-        )
+    )
 
     # ---------------------------------------------------------
     # DEPTH SORT
     # ---------------------------------------------------------
 
-    triangles.sort(
-        key=lambda item: item["depth"],
-        reverse=True
+    logger.info(
+        "CPU RENDER 9: sorting triangles by depth"
     )
+
+    draw_order = np.argsort(
+        depths
+    )[::-1]
 
     # ---------------------------------------------------------
     # WRITE SVG
     # ---------------------------------------------------------
 
     logger.info(
-        "CPU RENDER 7: writing SVG"
+        "CPU RENDER 10: writing SVG"
     )
 
     with open(
@@ -618,7 +719,8 @@ def render_step_svg(
     ) as svg:
 
         svg.write(
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<?xml version="1.0" '
+            'encoding="UTF-8"?>\n'
         )
 
         svg.write(
@@ -647,49 +749,72 @@ def render_step_svg(
             )
         )
 
-        for triangle in triangles:
+        buffer = []
+        buffer_limit = 2000
 
-            image_point_1 = (
-                image_coordinates(
-                    triangle["points"][0][0],
-                    triangle["points"][0][1]
-                )
-            )
+        for ordered_index in draw_order:
 
-            image_point_2 = (
-                image_coordinates(
-                    triangle["points"][1][0],
-                    triangle["points"][1][1]
-                )
-            )
+            triangle_points = points[
+                ordered_index
+            ]
 
-            image_point_3 = (
-                image_coordinates(
-                    triangle["points"][2][0],
-                    triangle["points"][2][1]
-                )
-            )
+            if highlighted[
+                ordered_index
+            ]:
+                color = highlight_color
+            else:
+                color = base_color
 
             polygon_points = (
                 "{:.3f},{:.3f} "
                 "{:.3f},{:.3f} "
                 "{:.3f},{:.3f}"
             ).format(
-                image_point_1[0],
-                image_point_1[1],
-                image_point_2[0],
-                image_point_2[1],
-                image_point_3[0],
-                image_point_3[1]
+                float(
+                    triangle_points[0, 0]
+                ),
+                float(
+                    triangle_points[0, 1]
+                ),
+                float(
+                    triangle_points[1, 0]
+                ),
+                float(
+                    triangle_points[1, 1]
+                ),
+                float(
+                    triangle_points[2, 0]
+                ),
+                float(
+                    triangle_points[2, 1]
+                )
             )
 
-            svg.write(
+            buffer.append(
                 '<polygon '
                 'points="{}" '
                 'fill="{}" '
                 'stroke="none"/>\n'.format(
                     polygon_points,
-                    triangle["color"]
+                    color
+                )
+            )
+
+            if len(buffer) >= buffer_limit:
+
+                svg.write(
+                    "".join(
+                        buffer
+                    )
+                )
+
+                buffer.clear()
+
+        if buffer:
+
+            svg.write(
+                "".join(
+                    buffer
                 )
             )
 
@@ -698,7 +823,7 @@ def render_step_svg(
         )
 
     # ---------------------------------------------------------
-    # VERIFY SVG
+    # VERIFY OUTPUT
     # ---------------------------------------------------------
 
     if not os.path.exists(
@@ -718,7 +843,8 @@ def render_step_svg(
         )
 
     logger.info(
-        "CPU RENDER 8: SVG generated, size={} bytes".format(
+        "CPU RENDER 11: "
+        "SVG generated, size={} bytes".format(
             output_size
         )
     )
