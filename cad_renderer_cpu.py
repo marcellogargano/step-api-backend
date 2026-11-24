@@ -1,5 +1,5 @@
 """
-Memory-efficient CPU CAD renderer.
+Memory-efficient CPU CAD renderer with B-Rep edge overlay.
 
 Geometry comes exclusively from the real Open CASCADE B-Rep.
 No OpenGL, VTK, OSMesa or GPU rendering is used.
@@ -8,7 +8,8 @@ Open CASCADE:
     STEP -> TopoDS_Shape -> BRepMesh triangulation
 
 CPU renderer:
-    3D vertices -> orthographic projection -> compact NumPy arrays -> SVG
+    faces -> compact NumPy arrays -> orthographic SVG fills
+    edges -> BRepAdaptor_Curve -> orthographic SVG black lines
 
 B-Rep face IDs remain consistent with /analyze/faces.
 """
@@ -21,10 +22,12 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from OCC.Core.BRep import BRep_Tool
+from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
 from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
+from OCC.Core.GeomAbs import GeomAbs_Line
 from OCC.Core.IFSelect import IFSelect_RetDone
 from OCC.Core.STEPControl import STEPControl_Reader
-from OCC.Core.TopAbs import TopAbs_FACE, TopAbs_REVERSED
+from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
 from OCC.Core.TopExp import TopExp_Explorer
 from OCC.Core.TopLoc import TopLoc_Location
 from OCC.Core.TopoDS import topods
@@ -36,7 +39,6 @@ logger = logging.getLogger(__name__)
 def _normalize(
     vector: List[float]
 ) -> Tuple[float, float, float]:
-    """Normalize a three-dimensional vector."""
 
     if len(vector) != 3:
         raise ValueError(
@@ -66,7 +68,6 @@ def _normalize(
 
 
 def _cross(a, b):
-    """Cross product of two three-dimensional vectors."""
 
     return (
         a[1] * b[2] - a[2] * b[1],
@@ -76,7 +77,6 @@ def _cross(a, b):
 
 
 def _dot(a, b):
-    """Dot product of two three-dimensional vectors."""
 
     return (
         a[0] * b[0] +
@@ -89,7 +89,6 @@ def _validate_color(
     value: str,
     name: str
 ) -> str:
-    """Validate and normalize a hexadecimal color."""
 
     value = value.strip().upper()
 
@@ -117,7 +116,6 @@ def _read_and_mesh_step(
     linear_deflection: float,
     angular_deflection: float
 ):
-    """Read and triangulate the STEP B-Rep with Open CASCADE."""
 
     logger.info(
         "CPU RENDER 1: reading STEP"
@@ -181,9 +179,8 @@ def _read_and_mesh_step(
 
 
 def _count_triangles(shape) -> int:
-    """Count all triangles without storing them in Python objects."""
 
-    triangle_count = 0
+    total = 0
 
     explorer = TopExp_Explorer(
         shape,
@@ -198,19 +195,185 @@ def _count_triangles(shape) -> int:
 
         location = TopLoc_Location()
 
-        triangulation = BRep_Tool.Triangulation(
-            face,
-            location
+        triangulation = (
+            BRep_Tool.Triangulation(
+                face,
+                location
+            )
         )
 
         if triangulation is not None:
-            triangle_count += (
+
+            total += (
                 triangulation.NbTriangles()
             )
 
         explorer.Next()
 
-    return triangle_count
+    return total
+
+
+def _extract_projected_edges(
+    shape,
+    right,
+    up,
+    curve_samples: int = 48
+):
+
+    projected_edges = []
+
+    explorer = TopExp_Explorer(
+        shape,
+        TopAbs_EDGE
+    )
+
+    seen_edges = set()
+
+    while explorer.More():
+
+        edge = topods.Edge(
+            explorer.Current()
+        )
+
+        try:
+            edge_key = edge.HashCode(
+                2147483647
+            )
+
+        except Exception:
+            edge_key = None
+
+        if (
+            edge_key is not None
+            and edge_key in seen_edges
+        ):
+            explorer.Next()
+            continue
+
+        if edge_key is not None:
+            seen_edges.add(
+                edge_key
+            )
+
+        if BRep_Tool.Degenerated(
+            edge
+        ):
+            explorer.Next()
+            continue
+
+        try:
+
+            adaptor = BRepAdaptor_Curve(
+                edge
+            )
+
+            first_parameter = (
+                adaptor.FirstParameter()
+            )
+
+            last_parameter = (
+                adaptor.LastParameter()
+            )
+
+            if (
+                not math.isfinite(
+                    first_parameter
+                )
+                or not math.isfinite(
+                    last_parameter
+                )
+            ):
+                explorer.Next()
+                continue
+
+            if abs(
+                last_parameter
+                - first_parameter
+            ) < 1.0e-14:
+                explorer.Next()
+                continue
+
+            if adaptor.GetType() == GeomAbs_Line:
+                sample_count = 2
+            else:
+                sample_count = curve_samples
+
+            parameters = np.linspace(
+                first_parameter,
+                last_parameter,
+                sample_count,
+                dtype=np.float64
+            )
+
+            projected_points = []
+
+            for parameter in parameters:
+
+                point = adaptor.Value(
+                    float(parameter)
+                )
+
+                point_3d = (
+                    point.X(),
+                    point.Y(),
+                    point.Z()
+                )
+
+                projected_points.append(
+                    (
+                        _dot(
+                            point_3d,
+                            right
+                        ),
+                        _dot(
+                            point_3d,
+                            up
+                        )
+                    )
+                )
+
+            cleaned_points = [
+                projected_points[0]
+            ]
+
+            for point in projected_points[1:]:
+
+                previous_point = (
+                    cleaned_points[-1]
+                )
+
+                if (
+                    abs(
+                        point[0]
+                        - previous_point[0]
+                    ) > 1.0e-10
+                    or
+                    abs(
+                        point[1]
+                        - previous_point[1]
+                    ) > 1.0e-10
+                ):
+                    cleaned_points.append(
+                        point
+                    )
+
+            if len(cleaned_points) >= 2:
+
+                projected_edges.append(
+                    cleaned_points
+                )
+
+        except Exception as exc:
+
+            logger.warning(
+                "Could not project one B-Rep edge: {}".format(
+                    exc
+                )
+            )
+
+        explorer.Next()
+
+    return projected_edges
 
 
 def render_step_svg(
@@ -221,25 +384,17 @@ def render_step_svg(
     highlight_faces: Optional[List[str]] = None,
     highlight_color: str = "#FF0000",
     base_color: str = "#BFC5CC",
-    edge_color: str = "#202020",
+    edge_color: str = "#000000",
     background_color: str = "#FFFFFF",
     width: int = 1600,
     height: int = 1000,
     linear_deflection: float = 1.0,
     angular_deflection: float = 0.35
 ) -> str:
-    """
-    Generate an orthographic SVG projection from a STEP B-Rep.
 
-    Geometry and triangulation come from Open CASCADE.
-    Compact NumPy arrays are used to limit memory consumption.
-    """
-
-    # ---------------------------------------------------------
-    # INPUT VALIDATION
-    # ---------------------------------------------------------
-
-    if not os.path.exists(file_path):
+    if not os.path.exists(
+        file_path
+    ):
         raise FileNotFoundError(
             "STEP file not found: {}".format(
                 file_path
@@ -251,14 +406,12 @@ def render_step_svg(
             "SVG width and height must be at least 200 pixels"
         )
 
-    if linear_deflection <= 0:
+    if (
+        linear_deflection <= 0
+        or angular_deflection <= 0
+    ):
         raise ValueError(
-            "linear_deflection must be greater than zero"
-        )
-
-    if angular_deflection <= 0:
-        raise ValueError(
-            "angular_deflection must be greater than zero"
+            "Mesh deflections must be greater than zero"
         )
 
     highlight_color = _validate_color(
@@ -271,7 +424,7 @@ def render_step_svg(
         "base_color"
     )
 
-    _validate_color(
+    edge_color = _validate_color(
         edge_color,
         "edge_color"
     )
@@ -280,10 +433,6 @@ def render_step_svg(
         background_color,
         "background_color"
     )
-
-    # ---------------------------------------------------------
-    # CAMERA BASIS
-    # ---------------------------------------------------------
 
     view = _normalize(
         view_direction
@@ -298,20 +447,20 @@ def render_step_svg(
         requested_up
     )
 
-    right_length = math.sqrt(
+    if math.sqrt(
         _dot(
             right_raw,
             right_raw
         )
-    )
-
-    if right_length < 1.0e-12:
+    ) < 1.0e-12:
         raise ValueError(
             "view_direction and up_direction cannot be parallel"
         )
 
     right = _normalize(
-        list(right_raw)
+        list(
+            right_raw
+        )
     )
 
     up = _normalize(
@@ -323,10 +472,6 @@ def render_step_svg(
         )
     )
 
-    # ---------------------------------------------------------
-    # FACE SELECTION
-    # ---------------------------------------------------------
-
     highlight_set = {
         str(face_id).strip().upper()
         for face_id in (
@@ -335,19 +480,11 @@ def render_step_svg(
         if str(face_id).strip()
     }
 
-    # ---------------------------------------------------------
-    # READ AND MESH STEP
-    # ---------------------------------------------------------
-
     shape = _read_and_mesh_step(
         file_path,
         linear_deflection,
         angular_deflection
     )
-
-    # ---------------------------------------------------------
-    # COUNT TRIANGLES
-    # ---------------------------------------------------------
 
     logger.info(
         "CPU RENDER 5: counting B-Rep triangles"
@@ -361,10 +498,6 @@ def render_step_svg(
         raise RuntimeError(
             "Open CASCADE did not generate any display triangles"
         )
-
-    # ---------------------------------------------------------
-    # ALLOCATE COMPACT ARRAYS
-    # ---------------------------------------------------------
 
     logger.info(
         "CPU RENDER 6: allocating compact arrays "
@@ -392,19 +525,21 @@ def render_step_svg(
         dtype=np.uint8
     )
 
-    # ---------------------------------------------------------
-    # PROJECTED EXTENTS
-    # ---------------------------------------------------------
+    projected_x_min = float(
+        "inf"
+    )
 
-    projected_x_min = float("inf")
-    projected_x_max = float("-inf")
+    projected_x_max = float(
+        "-inf"
+    )
 
-    projected_y_min = float("inf")
-    projected_y_max = float("-inf")
+    projected_y_min = float(
+        "inf"
+    )
 
-    # ---------------------------------------------------------
-    # PROJECT TRIANGLES
-    # ---------------------------------------------------------
+    projected_y_max = float(
+        "-inf"
+    )
 
     explorer = TopExp_Explorer(
         shape,
@@ -430,9 +565,11 @@ def render_step_svg(
 
         location = TopLoc_Location()
 
-        triangulation = BRep_Tool.Triangulation(
-            face,
-            location
+        triangulation = (
+            BRep_Tool.Triangulation(
+                face,
+                location
+            )
         )
 
         if triangulation is not None:
@@ -471,6 +608,7 @@ def render_step_svg(
                 )
 
                 if reversed_face:
+
                     node_2, node_3 = (
                         node_3,
                         node_2
@@ -478,14 +616,15 @@ def render_step_svg(
 
                 depth_sum = 0.0
 
-                node_indices = (
-                    node_1,
-                    node_2,
-                    node_3
-                )
-
-                for local_index, node_index in enumerate(
-                    node_indices
+                for (
+                    local_index,
+                    node_index
+                ) in enumerate(
+                    (
+                        node_1,
+                        node_2,
+                        node_3
+                    )
                 ):
 
                     point = (
@@ -594,9 +733,25 @@ def render_step_svg(
         )
     )
 
-    # ---------------------------------------------------------
-    # PROJECTED MODEL DIMENSIONS
-    # ---------------------------------------------------------
+    logger.info(
+        "CPU RENDER 9: extracting projected B-Rep edges"
+    )
+
+    projected_edges = (
+        _extract_projected_edges(
+            shape,
+            right,
+            up
+        )
+    )
+
+    logger.info(
+        "CPU RENDER 10: extracted {} B-Rep edges".format(
+            len(
+                projected_edges
+            )
+        )
+    )
 
     projected_width = (
         projected_x_max
@@ -608,19 +763,13 @@ def render_step_svg(
         - projected_y_min
     )
 
-    if projected_width <= 1.0e-12:
+    if (
+        projected_width <= 1.0e-12
+        or projected_height <= 1.0e-12
+    ):
         raise RuntimeError(
-            "Invalid projected model width"
+            "Invalid projected model dimensions"
         )
-
-    if projected_height <= 1.0e-12:
-        raise RuntimeError(
-            "Invalid projected model height"
-        )
-
-    # ---------------------------------------------------------
-    # FIT INTO SVG CANVAS
-    # ---------------------------------------------------------
 
     margin = 40.0
 
@@ -636,19 +785,11 @@ def render_step_svg(
         - 2.0 * margin
     )
 
-    scale_x = (
+    scale = min(
         usable_width
-        / projected_width
-    )
-
-    scale_y = (
+        / projected_width,
         usable_height
         / projected_height
-    )
-
-    scale = min(
-        scale_x,
-        scale_y
     )
 
     rendered_width = (
@@ -671,8 +812,6 @@ def render_step_svg(
         - rendered_height
     ) / 2.0
 
-    # Convert projected coordinates directly in compact arrays.
-
     points[:, :, 0] = (
         x_offset
         + (
@@ -692,24 +831,16 @@ def render_step_svg(
         )
     )
 
-    # ---------------------------------------------------------
-    # DEPTH SORT
-    # ---------------------------------------------------------
-
     logger.info(
-        "CPU RENDER 9: sorting triangles by depth"
+        "CPU RENDER 11: sorting triangles by depth"
     )
 
     draw_order = np.argsort(
         depths
     )[::-1]
 
-    # ---------------------------------------------------------
-    # WRITE SVG
-    # ---------------------------------------------------------
-
     logger.info(
-        "CPU RENDER 10: writing SVG"
+        "CPU RENDER 12: writing SVG"
     )
 
     with open(
@@ -749,7 +880,7 @@ def render_step_svg(
             )
         )
 
-        buffer = []
+        face_buffer = []
         buffer_limit = 2000
 
         for ordered_index in draw_order:
@@ -790,7 +921,7 @@ def render_step_svg(
                 )
             )
 
-            buffer.append(
+            face_buffer.append(
                 '<polygon '
                 'points="{}" '
                 'fill="{}" '
@@ -800,31 +931,92 @@ def render_step_svg(
                 )
             )
 
-            if len(buffer) >= buffer_limit:
+            if len(
+                face_buffer
+            ) >= buffer_limit:
 
                 svg.write(
                     "".join(
-                        buffer
+                        face_buffer
                     )
                 )
 
-                buffer.clear()
+                face_buffer.clear()
 
-        if buffer:
+        if face_buffer:
 
             svg.write(
                 "".join(
-                    buffer
+                    face_buffer
                 )
             )
 
         svg.write(
-            "</svg>\n"
+            '<g '
+            'fill="none" '
+            'stroke="{}" '
+            'stroke-width="1.5" '
+            'stroke-linecap="round" '
+            'stroke-linejoin="round">\n'.format(
+                edge_color
+            )
         )
 
-    # ---------------------------------------------------------
-    # VERIFY OUTPUT
-    # ---------------------------------------------------------
+        for projected_edge in projected_edges:
+
+            svg_points = []
+
+            for (
+                projected_x,
+                projected_y
+            ) in projected_edge:
+
+                image_x = (
+                    x_offset
+                    + (
+                        projected_x
+                        - projected_x_min
+                    ) * scale
+                )
+
+                image_y = (
+                    float(height)
+                    - (
+                        y_offset
+                        + (
+                            projected_y
+                            - projected_y_min
+                        ) * scale
+                    )
+                )
+
+                svg_points.append(
+                    "{:.3f},{:.3f}".format(
+                        image_x,
+                        image_y
+                    )
+                )
+
+            if len(
+                svg_points
+            ) >= 2:
+
+                svg.write(
+                    '<polyline '
+                    'points="{}"/>\n'.format(
+                        " ".join(
+                            svg_points
+                        )
+                    )
+                )
+
+        svg.write(
+            "</g>\n"
+        )
+
+        svg.write(
+            "</svg>\n"
+        )
 
     if not os.path.exists(
         output_path
@@ -843,7 +1035,7 @@ def render_step_svg(
         )
 
     logger.info(
-        "CPU RENDER 11: "
+        "CPU RENDER 13: "
         "SVG generated, size={} bytes".format(
             output_size
         )
