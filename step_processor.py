@@ -35,7 +35,7 @@ try:
     GeomAbs_BSplineSurface
 )
     from OCC.Core.BRepCheck import BRepCheck_Analyzer
-    from OCC.Core.TopoDS import TopoDS_Shape, TopoDS_Compound
+    from OCC.Core.TopoDS import TopoDS_Shape, TopoDS_Compound, topods
     from OCC.Core.TopTools import TopTools_IndexedMapOfShape
     from OCC.Core.TopExp import topexp
     from OCC.Extend.TopologyUtils import TopologyExplorer
@@ -120,180 +120,177 @@ class STEPProcessor:
         return self._validate_shape(shape)
 
     def get_faces(self, file_path: str) -> Dict[str, Any]:
-    """
-    Extract all B-Rep faces from the STEP model.
+        """
+        Extract all B-Rep faces from the STEP model.
 
-    Each face receives a sequential identifier and its exact
-    Open CASCADE area, centroid, surface type and bounding box.
-    """
+        Each face receives a sequential identifier and its exact
+        Open CASCADE area, centroid, surface type and bounding box.
+        """
 
-    if not self.occt_available:
-        raise RuntimeError("pythonocc-core not installed")
+        if not self.occt_available:
+            raise RuntimeError("pythonocc-core not installed")
 
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
 
-    shape, metadata = self._read_step_file(file_path)
+        shape, metadata = self._read_step_file(file_path)
 
-    surface_names = {
-        GeomAbs_Plane: "PLANE",
-        GeomAbs_Cylinder: "CYLINDER",
-        GeomAbs_Cone: "CONE",
-        GeomAbs_Sphere: "SPHERE",
-        GeomAbs_Torus: "TORUS",
-        GeomAbs_BezierSurface: "BEZIER_SURFACE",
-        GeomAbs_BSplineSurface: "BSPLINE_SURFACE"
-    }
+        surface_names = {
+            GeomAbs_Plane: "PLANE",
+            GeomAbs_Cylinder: "CYLINDER",
+            GeomAbs_Cone: "CONE",
+            GeomAbs_Sphere: "SPHERE",
+            GeomAbs_Torus: "TORUS",
+            GeomAbs_BezierSurface: "BEZIER_SURFACE",
+            GeomAbs_BSplineSurface: "BSPLINE_SURFACE"
+        }
 
-    faces = []
-    errors = []
+        faces = []
+        errors = []
 
-    explorer = TopExp_Explorer(shape, TopAbs_FACE)
-    face_index = 1
+        explorer = TopExp_Explorer(shape, TopAbs_FACE)
+        face_index = 1
 
-    while explorer.More():
+        while explorer.More():
 
-        try:
-            face = topods.Face(explorer.Current())
+            try:
+                face = topods.Face(explorer.Current())
 
-            # Exact B-Rep surface area and centroid
-            props = GProp_GProps()
-            brepgprop_SurfaceProperties(face, props)
+                props = GProp_GProps()
+                brepgprop_SurfaceProperties(face, props)
 
-            area = props.Mass()
-            centroid = props.CentreOfMass()
+                area = props.Mass()
+                centroid = props.CentreOfMass()
 
-            # Analytical surface classification
-            adaptor = BRepAdaptor_Surface(face)
-            surface_type_code = adaptor.GetType()
-            surface_type = surface_names.get(
-                surface_type_code,
-                "OTHER"
-            )
+                adaptor = BRepAdaptor_Surface(face)
+                surface_type_code = adaptor.GetType()
 
-            # Face bounding box
-            bbox = Bnd_Box()
-            brepbndlib_Add(face, bbox)
+                surface_type = surface_names.get(
+                    surface_type_code,
+                    "OTHER"
+                )
 
-            xmin, ymin, zmin, xmax, ymax, zmax = bbox.Get()
+                bbox = Bnd_Box()
+                brepbndlib_Add(face, bbox)
 
-            face_data = {
-                "face_id": f"FACE_{face_index}",
-                "index": face_index,
-                "surface_type": surface_type,
-                "area": {
-                    "value": area,
-                    "unit": "square_mm"
-                },
-                "centroid": {
-                    "x": centroid.X(),
-                    "y": centroid.Y(),
-                    "z": centroid.Z(),
-                    "unit": "mm"
-                },
-                "bounding_box": {
-                    "min": {
-                        "x": xmin,
-                        "y": ymin,
-                        "z": zmin
+                xmin, ymin, zmin, xmax, ymax, zmax = bbox.Get()
+
+                face_data = {
+                    "face_id": f"FACE_{face_index}",
+                    "index": face_index,
+                    "surface_type": surface_type,
+                    "area": {
+                        "value": area,
+                        "unit": "square_mm"
                     },
-                    "max": {
-                        "x": xmax,
-                        "y": ymax,
-                        "z": zmax
+                    "centroid": {
+                        "x": centroid.X(),
+                        "y": centroid.Y(),
+                        "z": centroid.Z(),
+                        "unit": "mm"
                     },
-                    "unit": "mm"
-                }
-            }
-
-            # Add analytical parameters when available
-            if surface_type == "PLANE":
-                plane = adaptor.Plane()
-                axis = plane.Axis()
-                normal = axis.Direction()
-
-                face_data["plane"] = {
-                    "normal": {
-                        "x": normal.X(),
-                        "y": normal.Y(),
-                        "z": normal.Z()
-                    },
-                    "location": {
-                        "x": plane.Location().X(),
-                        "y": plane.Location().Y(),
-                        "z": plane.Location().Z()
+                    "bounding_box": {
+                        "min": {
+                            "x": xmin,
+                            "y": ymin,
+                            "z": zmin
+                        },
+                        "max": {
+                            "x": xmax,
+                            "y": ymax,
+                            "z": zmax
+                        },
+                        "unit": "mm"
                     }
                 }
 
-            elif surface_type == "CYLINDER":
-                cylinder = adaptor.Cylinder()
-                axis = cylinder.Axis()
-                direction = axis.Direction()
+                if surface_type == "PLANE":
+                    plane = adaptor.Plane()
+                    axis = plane.Axis()
+                    normal = axis.Direction()
 
-                face_data["cylinder"] = {
-                    "radius": cylinder.Radius(),
-                    "axis_direction": {
-                        "x": direction.X(),
-                        "y": direction.Y(),
-                        "z": direction.Z()
-                    },
-                    "axis_location": {
-                        "x": axis.Location().X(),
-                        "y": axis.Location().Y(),
-                        "z": axis.Location().Z()
+                    face_data["plane"] = {
+                        "normal": {
+                            "x": normal.X(),
+                            "y": normal.Y(),
+                            "z": normal.Z()
+                        },
+                        "location": {
+                            "x": plane.Location().X(),
+                            "y": plane.Location().Y(),
+                            "z": plane.Location().Z()
+                        }
                     }
-                }
 
-            elif surface_type == "CONE":
-                cone = adaptor.Cone()
+                elif surface_type == "CYLINDER":
+                    cylinder = adaptor.Cylinder()
+                    axis = cylinder.Axis()
+                    direction = axis.Direction()
 
-                face_data["cone"] = {
-                    "reference_radius": cone.RefRadius(),
-                    "semi_angle_rad": cone.SemiAngle()
-                }
-
-            elif surface_type == "SPHERE":
-                sphere = adaptor.Sphere()
-
-                face_data["sphere"] = {
-                    "radius": sphere.Radius(),
-                    "center": {
-                        "x": sphere.Location().X(),
-                        "y": sphere.Location().Y(),
-                        "z": sphere.Location().Z()
+                    face_data["cylinder"] = {
+                        "radius": cylinder.Radius(),
+                        "axis_direction": {
+                            "x": direction.X(),
+                            "y": direction.Y(),
+                            "z": direction.Z()
+                        },
+                        "axis_location": {
+                            "x": axis.Location().X(),
+                            "y": axis.Location().Y(),
+                            "z": axis.Location().Z()
+                        }
                     }
-                }
 
-            elif surface_type == "TORUS":
-                torus = adaptor.Torus()
+                elif surface_type == "CONE":
+                    cone = adaptor.Cone()
 
-                face_data["torus"] = {
-                    "major_radius": torus.MajorRadius(),
-                    "minor_radius": torus.MinorRadius()
-                }
+                    face_data["cone"] = {
+                        "reference_radius": cone.RefRadius(),
+                        "semi_angle_rad": cone.SemiAngle()
+                    }
 
-            faces.append(face_data)
+                elif surface_type == "SPHERE":
+                    sphere = adaptor.Sphere()
 
-        except Exception as exc:
-            logger.warning(
-                f"Could not analyze FACE_{face_index}: {exc}"
-            )
+                    face_data["sphere"] = {
+                        "radius": sphere.Radius(),
+                        "center": {
+                            "x": sphere.Location().X(),
+                            "y": sphere.Location().Y(),
+                            "z": sphere.Location().Z()
+                        }
+                    }
 
-            errors.append({
-                "face_id": f"FACE_{face_index}",
-                "error": str(exc)
-            })
+                elif surface_type == "TORUS":
+                    torus = adaptor.Torus()
 
-        face_index += 1
-        explorer.Next()
+                    face_data["torus"] = {
+                        "major_radius": torus.MajorRadius(),
+                        "minor_radius": torus.MinorRadius()
+                    }
 
-    return {
-        "metadata": metadata,
-        "face_count": len(faces),
-        "failed_face_count": len(errors),
-        "faces": faces,
-        "errors": errors
-    }
+                faces.append(face_data)
+
+            except Exception as exc:
+                logger.warning(
+                    f"Could not analyze FACE_{face_index}: {exc}"
+                )
+
+                errors.append({
+                    "face_id": f"FACE_{face_index}",
+                    "error": str(exc)
+                })
+
+            face_index += 1
+            explorer.Next()
+
+        return {
+            "metadata": metadata,
+            "face_count": len(faces),
+            "failed_face_count": len(errors),
+            "faces": faces,
+            "errors": errors
+        }
     
     def _read_step_file(self, file_path: str) -> Tuple[TopoDS_Shape, Dict[str, Any]]:
         """
