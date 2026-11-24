@@ -5,13 +5,15 @@ FastAPI backend for processing STEP files and extracting geometric and topology 
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi import BackgroundTasks
 import tempfile
 import os
 from typing import Dict, Any
 import logging
 
 from step_processor import STEPProcessor
+from cad_renderer import render_step_view
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -234,6 +236,108 @@ async def analyze_faces(file: UploadFile = File(...)) -> Dict[str, Any]:
                 logger.warning(
                     f"Failed to delete temp file: {e}"
                 )
+
+@app.post("/render")
+async def render_step_file(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...)
+):
+    """
+    Generate an orthographic CAD rendering from the real STEP B-Rep.
+
+    Initial validation configuration:
+    - view direction: -Z
+    - up direction: +Y
+    - orthographic projection
+    - no highlighted faces
+    """
+
+    if not file.filename or not file.filename.lower().endswith(('.step', '.stp')):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid STEP file"
+        )
+
+    step_path = None
+    image_path = None
+
+    try:
+        file_ext = os.path.splitext(file.filename)[1].lower()
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=file_ext
+        ) as temp_step:
+
+            content = await file.read()
+            temp_step.write(content)
+            step_path = temp_step.name
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=".png"
+        ) as temp_image:
+
+            image_path = temp_image.name
+
+        logger.info(
+            f"Rendering STEP B-Rep: {file.filename} "
+            f"({len(content)} bytes)"
+        )
+
+        render_step_view(
+            file_path=step_path,
+            output_path=image_path,
+
+            # XY view looking along -Z
+            view_direction=[0.0, 0.0, -1.0],
+
+            # +Y is vertical in the resulting image
+            up_direction=[0.0, 1.0, 0.0],
+
+            highlight_faces=[],
+
+            base_color="#B8BEC7",
+            background_color="#FFFFFF",
+
+            width=1600,
+            height=1000
+        )
+
+        background_tasks.add_task(
+            os.unlink,
+            step_path
+        )
+
+        background_tasks.add_task(
+            os.unlink,
+            image_path
+        )
+
+        return FileResponse(
+            image_path,
+            media_type="image/png",
+            filename="step_projection_XY_minusZ.png",
+            background=background_tasks
+        )
+
+    except Exception as e:
+
+        logger.error(
+            f"STEP rendering error: {str(e)}",
+            exc_info=True
+        )
+
+        if step_path and os.path.exists(step_path):
+            os.unlink(step_path)
+
+        if image_path and os.path.exists(image_path):
+            os.unlink(image_path)
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"STEP rendering failed: {str(e)}"
+        )
 
 @app.post("/validate")
 async def validate_step_file(file: UploadFile = File(...)) -> Dict[str, Any]:
