@@ -146,7 +146,6 @@ async def analyze_geometry_only(file: UploadFile = File(...)) -> Dict[str, Any]:
         if temp_file and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
 
-
 @app.post("/analyze/topology")
 async def analyze_topology_only(file: UploadFile = File(...)) -> Dict[str, Any]:
     """
@@ -179,6 +178,62 @@ async def analyze_topology_only(file: UploadFile = File(...)) -> Dict[str, Any]:
         if temp_file and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
 
+@app.post("/analyze/faces")
+async def analyze_faces(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """
+    Extract all B-Rep faces from STEP file.
+
+    Returns exact Open CASCADE face data including:
+    face ID, surface type, area, centroid and bounding box.
+    """
+
+    if not file.filename or not file.filename.lower().endswith(('.step', '.stp')):
+        raise HTTPException(status_code=400, detail="Invalid STEP file")
+
+    temp_file = None
+    temp_file_path = None
+
+    try:
+        file_ext = os.path.splitext(file.filename)[1].lower()
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=file_ext
+        ) as temp_file:
+
+            content = await file.read()
+            temp_file.write(content)
+            temp_file_path = temp_file.name
+
+        logger.info(
+            f"Processing faces: {file.filename} ({len(content)} bytes)"
+        )
+
+        result = processor.get_faces(temp_file_path)
+
+        result["original_filename"] = file.filename
+
+        return result
+
+    except Exception as e:
+        logger.error(
+            f"Error processing faces: {str(e)}",
+            exc_info=True
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing STEP faces: {str(e)}"
+        )
+
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to delete temp file: {e}"
+                )
 
 @app.post("/validate")
 async def validate_step_file(file: UploadFile = File(...)) -> Dict[str, Any]:
