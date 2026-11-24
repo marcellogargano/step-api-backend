@@ -32,35 +32,71 @@ logger = logging.getLogger(__name__)
 
 
 def _normalize(v: List[float]) -> Tuple[float, float, float]:
+    if len(v) != 3:
+        raise ValueError(
+            "Direction vector must contain exactly 3 values"
+        )
 
-    x = float(v[0])
-    y = float(v[1])
-    z = float(v[2])
+    x, y, z = map(float, v)
 
-    n = math.sqrt(x*x + y*y + z*z)
+    n = math.sqrt(
+        x * x +
+        y * y +
+        z * z
+    )
 
     if n < 1e-12:
-        raise ValueError("Zero direction vector")
+        raise ValueError(
+            "Zero direction vector"
+        )
 
-    return x/n, y/n, z/n
+    return (
+        x / n,
+        y / n,
+        z / n
+    )
 
 
 def _cross(a, b):
-
     return (
-        a[1]*b[2] - a[2]*b[1],
-        a[2]*b[0] - a[0]*b[2],
-        a[0]*b[1] - a[1]*b[0]
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0]
     )
 
 
 def _dot(a, b):
-
     return (
-        a[0]*b[0] +
-        a[1]*b[1] +
-        a[2]*b[2]
+        a[0] * b[0] +
+        a[1] * b[1] +
+        a[2] * b[2]
     )
+
+
+def _validate_color(
+    value: str,
+    name: str
+) -> str:
+
+    value = value.strip()
+
+    if (
+        len(value) != 7
+        or not value.startswith("#")
+    ):
+        raise ValueError(
+            f"{name} must use #RRGGBB format"
+        )
+
+    try:
+        int(value[1:], 16)
+
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must use #RRGGBB format"
+        ) from exc
+
+    return value.upper()
 
 
 def render_step_svg(
@@ -84,30 +120,87 @@ def render_step_svg(
     angular_deflection: float = 0.35
 ):
 
-    logger.info("CPU RENDER 1: reading STEP")
+    # ------------------------------------------------------------
+    # VALIDATION
+    # ------------------------------------------------------------
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(
+            f"STEP file not found: {file_path}"
+        )
+
+    if width < 200 or height < 200:
+        raise ValueError(
+            "SVG width and height must be at least 200"
+        )
+
+    if (
+        linear_deflection <= 0
+        or angular_deflection <= 0
+    ):
+        raise ValueError(
+            "Mesh deflections must be greater than zero"
+        )
+
+    highlight_color = _validate_color(
+        highlight_color,
+        "highlight_color"
+    )
+
+    base_color = _validate_color(
+        base_color,
+        "base_color"
+    )
+
+    edge_color = _validate_color(
+        edge_color,
+        "edge_color"
+    )
+
+    background_color = _validate_color(
+        background_color,
+        "background_color"
+    )
+
+    # ------------------------------------------------------------
+    # READ STEP USING OPEN CASCADE
+    # ------------------------------------------------------------
+
+    logger.info(
+        "CPU RENDER 1: reading STEP"
+    )
 
     reader = STEPControl_Reader()
 
-    status = reader.ReadFile(file_path)
+    status = reader.ReadFile(
+        file_path
+    )
 
     if status != IFSelect_RetDone:
-        raise RuntimeError("Open CASCADE STEP read failed")
+        raise RuntimeError(
+            "Open CASCADE STEP read failed"
+        )
 
     reader.TransferRoots()
 
     shape = reader.OneShape()
 
     if shape.IsNull():
-        raise RuntimeError("Open CASCADE returned null shape")
+        raise RuntimeError(
+            "Open CASCADE returned null shape"
+        )
 
-    logger.info("CPU RENDER 2: STEP loaded")
-
+    logger.info(
+        "CPU RENDER 2: STEP loaded"
+    )
 
     # ------------------------------------------------------------
-    # CREATE REAL OCCT TRIANGULATION
+    # CREATE REAL OPEN CASCADE B-REP TRIANGULATION
     # ------------------------------------------------------------
 
-    logger.info("CPU RENDER 3: starting BRep meshing")
+    logger.info(
+        "CPU RENDER 3: starting BRep meshing"
+    )
 
     mesher = BRepMesh_IncrementalMesh(
         shape,
@@ -120,31 +213,77 @@ def render_step_svg(
     mesher.Perform()
 
     if not mesher.IsDone():
-        raise RuntimeError("Open CASCADE meshing failed")
+        raise RuntimeError(
+            "Open CASCADE meshing failed"
+        )
 
-    logger.info("CPU RENDER 4: BRep meshing completed")
-
+    logger.info(
+        "CPU RENDER 4: BRep meshing completed"
+    )
 
     # ------------------------------------------------------------
     # CAMERA BASIS
     # ------------------------------------------------------------
 
-    view = _normalize(view_direction)
+    view = _normalize(
+        view_direction
+    )
 
-    up_input = _normalize(up_direction)
+    up_input = _normalize(
+        up_direction
+    )
 
-    right = _normalize(_cross(view, up_input))
+    cross = _cross(
+        view,
+        up_input
+    )
 
-    up = _normalize(_cross(right, view))
+    cross_size = math.sqrt(
+        _dot(cross, cross)
+    )
 
+    if cross_size < 1e-12:
+        raise ValueError(
+            "view_direction and up_direction "
+            "cannot be parallel"
+        )
+
+    right = _normalize(
+        list(cross)
+    )
+
+    up = _normalize(
+        list(
+            _cross(
+                right,
+                view
+            )
+        )
+    )
 
     # ------------------------------------------------------------
-    # EXTRACT EXACT FACE TRIANGULATION
+    # FACE SELECTION
     # ------------------------------------------------------------
 
-    highlight_set = set(highlight_faces or [])
+    highlight_set = {
+        str(face_id).strip().upper()
+        for face_id in (
+            highlight_faces or []
+        )
+        if str(face_id).strip()
+    }
+
+    # ------------------------------------------------------------
+    # EXTRACT FACE TRIANGULATION
+    # ------------------------------------------------------------
 
     triangles = []
+
+    xmin = float("inf")
+    xmax = float("-inf")
+
+    ymin = float("inf")
+    ymax = float("-inf")
 
     explorer = TopExp_Explorer(
         shape,
@@ -159,18 +298,24 @@ def render_step_svg(
             explorer.Current()
         )
 
-        face_id = f"FACE_{face_index}"
+        face_id = (
+            f"FACE_{face_index}"
+        )
 
         location = TopLoc_Location()
 
-        triangulation = BRep_Tool.Triangulation(
-            face,
-            location
+        triangulation = (
+            BRep_Tool.Triangulation(
+                face,
+                location
+            )
         )
 
         if triangulation is not None:
 
-            transformation = location.Transformation()
+            transformation = (
+                location.Transformation()
+            )
 
             reversed_face = (
                 face.Orientation()
@@ -187,45 +332,55 @@ def render_step_svg(
                 triangulation.NbTriangles() + 1
             ):
 
-                triangle = triangulation.Triangle(i)
+                triangle = (
+                    triangulation.Triangle(i)
+                )
 
-                n1, n2, n3 = triangle.Get()
+                n1, n2, n3 = (
+                    triangle.Get()
+                )
 
                 if reversed_face:
                     n2, n3 = n3, n2
-
-                nodes = []
-
-                for node_index in (n1, n2, n3):
-
-                    p = triangulation.Node(
-                        node_index
-                    ).Transformed(
-                        transformation
-                    )
-
-                    nodes.append(
-                        (
-                            p.X(),
-                            p.Y(),
-                            p.Z()
-                        )
-                    )
-
-
-                # ------------------------------------------------
-                # ORTHOGRAPHIC PROJECTION
-                # ------------------------------------------------
 
                 projected = []
 
                 depth_sum = 0.0
 
-                for p in nodes:
+                for node_index in (
+                    n1,
+                    n2,
+                    n3
+                ):
 
-                    px = _dot(p, right)
-                    py = _dot(p, up)
-                    pz = _dot(p, view)
+                    p = (
+                        triangulation.Node(
+                            node_index
+                        ).Transformed(
+                            transformation
+                        )
+                    )
+
+                    point = (
+                        p.X(),
+                        p.Y(),
+                        p.Z()
+                    )
+
+                    px = _dot(
+                        point,
+                        right
+                    )
+
+                    py = _dot(
+                        point,
+                        up
+                    )
+
+                    pz = _dot(
+                        point,
+                        view
+                    )
 
                     projected.append(
                         (px, py)
@@ -233,63 +388,65 @@ def render_step_svg(
 
                     depth_sum += pz
 
-                depth = depth_sum / 3.0
+                    xmin = min(
+                        xmin,
+                        px
+                    )
+
+                    xmax = max(
+                        xmax,
+                        px
+                    )
+
+                    ymin = min(
+                        ymin,
+                        py
+                    )
+
+                    ymax = max(
+                        ymax,
+                        py
+                    )
 
                 triangles.append(
                     {
                         "face_id": face_id,
                         "points": projected,
-                        "depth": depth,
+                        "depth": (
+                            depth_sum / 3.0
+                        ),
                         "color": color
                     }
                 )
 
         face_index += 1
-        explorer.Next()
 
+        explorer.Next()
 
     if not triangles:
         raise RuntimeError(
             "No B-Rep triangles generated"
         )
 
-
     logger.info(
-        f"CPU RENDER 5: extracted {len(triangles)} triangles"
+        "CPU RENDER 5: "
+        f"extracted {len(triangles)} triangles"
     )
-
 
     # ------------------------------------------------------------
     # PROJECTED BOUNDING BOX
     # ------------------------------------------------------------
 
-    all_x = []
-    all_y = []
-
-    for triangle in triangles:
-
-        for x, y in triangle["points"]:
-
-            all_x.append(x)
-            all_y.append(y)
-
-
-    xmin = min(all_x)
-    xmax = max(all_x)
-
-    ymin = min(all_y)
-    ymax = max(all_y)
-
-
     dx = xmax - xmin
     dy = ymax - ymin
 
-
-    if dx <= 0 or dy <= 0:
+    if (
+        dx <= 1e-12
+        or dy <= 1e-12
+    ):
         raise RuntimeError(
             "Invalid projected model dimensions"
         )
-
 
     # ------------------------------------------------------------
     # FIT MODEL TO IMAGE
@@ -297,23 +454,28 @@ def render_step_svg(
 
     margin = 40.0
 
-    scale_x = (
-        (width - 2*margin) / dx
+    available_width = max(
+        1.0,
+        width - 2.0 * margin
     )
 
-    scale_y = (
-        (height - 2*margin) / dy
+    available_height = max(
+        1.0,
+        height - 2.0 * margin
     )
 
     scale = min(
-        scale_x,
-        scale_y
+        available_width / dx,
+        available_height / dy
     )
 
+    projected_width = (
+        dx * scale
+    )
 
-    projected_width = dx * scale
-    projected_height = dy * scale
-
+    projected_height = (
+        dy * scale
+    )
 
     offset_x = (
         width - projected_width
@@ -323,7 +485,6 @@ def render_step_svg(
         height - projected_height
     ) / 2.0
 
-
     def image_coordinates(x, y):
 
         ix = (
@@ -331,7 +492,7 @@ def render_step_svg(
             + (x - xmin) * scale
         )
 
-        # SVG Y axis points downward.
+        # SVG Y-axis points downward.
         iy = (
             height
             - (
@@ -340,26 +501,33 @@ def render_step_svg(
             )
         )
 
-        return ix, iy
-
+        return (
+            ix,
+            iy
+        )
 
     # ------------------------------------------------------------
     # PAINTER DEPTH SORT
     # ------------------------------------------------------------
+
+    # Far triangles are written first.
+    # Near triangles are written last.
+    #
+    # IMPORTANT:
+    # This is a visualization algorithm only.
+    # Geometric measurements and face selection remain B-Rep based.
 
     triangles.sort(
         key=lambda item: item["depth"],
         reverse=True
     )
 
-
     logger.info(
         "CPU RENDER 6: writing SVG"
     )
 
-
     # ------------------------------------------------------------
-    # WRITE VECTOR SVG
+    # WRITE SVG
     # ------------------------------------------------------------
 
     with open(
@@ -369,16 +537,26 @@ def render_step_svg(
     ) as svg:
 
         svg.write(
-            f'<svg xmlns="http://www.w3.org/2000/svg" '
-            f'width="{width}" height="{height}" '
-            f'viewBox="0 0 {width} {height}">'
+            '<?xml version="1.0" '
+            'encoding="UTF-8"?>\n'
         )
 
         svg.write(
-            f'<rect width="100%" height="100%" '
-            f'fill="{background_color}"/>'
+            f'<svg '
+            f'xmlns="http://www.w3.org/2000/svg" '
+            f'width="{width}" '
+            f'height="{height}" '
+            f'viewBox="0 0 {width} {height}">\n'
         )
 
+        svg.write(
+            f'<rect '
+            f'x="0" '
+            f'y="0" '
+            f'width="{width}" '
+            f'height="{height}" '
+            f'fill="{background_color}"/>\n'
+        )
 
         for triangle in triangles:
 
@@ -397,33 +575,43 @@ def render_step_svg(
                 triangle["points"][2][1]
             )
 
-
             points = (
-                f"{p1[0]:.3f},{p1[1]:.3f} "
-                f"{p2[0]:.3f},{p2[1]:.3f} "
-                f"{p3[0]:.3f},{p3[1]:.3f}"
-            )
+                f"{p1.3f},"
+                f"{p1.3f} "
 
+                f"{p2.3f},"
+                f"{p2.3f} "
+
+                f"{p3.3f},"
+                f"{p3.3f}"
+            )
 
             svg.write(
                 f'<polygon '
                 f'points="{points}" '
                 f'fill="{triangle["color"]}" '
-                f'stroke="none"/>'
+                f'stroke="none"/>\n'
             )
 
+        svg.write(
+            "</svg>\n"
+        )
 
-        # SVG ending
-        svg.write("</svg>")
+    # ------------------------------------------------------------
+    # VERIFY OUTPUT
+    # ------------------------------------------------------------
 
-
-    if not os.path.exists(output_path):
+    if (
+        not os.path.exists(output_path)
+        or os.path.getsize(output_path) == 0
+    ):
         raise RuntimeError(
             "SVG file was not generated"
         )
 
-
-    logger.  f"CPU RENDER 7: SVG generated: {output_path}"
+    logger.info(
+        "CPU RENDER 7: "
+        f"SVG generated: {output_path}"
     )
 
     return output_path
