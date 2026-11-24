@@ -8,6 +8,9 @@ Face selection and face numbering remain based on TopoDS_Face.
 
 import math
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 from typing import List, Optional, Tuple
 
 from OCC.Core.STEPControl import STEPControl_Reader
@@ -122,23 +125,42 @@ def render_step_view(
 
     highlight_set = set(highlight_faces or [])
 
-    # Import VTK only when rendering is requested.
+    logger.info("RENDER CHECKPOINT 1: starting VTK import")
+
     import vtk
 
+    logger.info("RENDER CHECKPOINT 2: VTK import completed")
+
     # Read the STEP file with Open CASCADE.
+    logger.info("RENDER CHECKPOINT 3: creating STEP reader")
+
     reader = STEPControl_Reader()
+
+    logger.info("RENDER CHECKPOINT 4: starting STEP ReadFile")
+
     status = reader.ReadFile(file_path)
+
+    logger.info("RENDER CHECKPOINT 5: STEP ReadFile completed")
 
     if status != IFSelect_RetDone:
         raise ValueError(f"Open CASCADE could not read: {file_path}")
 
+    logger.info("RENDER CHECKPOINT 6: starting TransferRoots")
+
     reader.TransferRoots()
+
+    logger.info("RENDER CHECKPOINT 7: TransferRoots completed")
+
     shape = reader.OneShape()
+
+    logger.info("RENDER CHECKPOINT 8: OneShape obtained")
 
     if shape.IsNull():
         raise ValueError("The STEP file produced a null Open CASCADE shape.")
 
     # Triangulate the Open CASCADE B-Rep.
+    logger.info("RENDER CHECKPOINT 9: creating BRep mesh")
+
     mesher = BRepMesh_IncrementalMesh(
         shape,
         linear_deflection,
@@ -147,7 +169,11 @@ def render_step_view(
         True
     )
 
+    logger.info("RENDER CHECKPOINT 10: starting BRep meshing")
+
     mesher.Perform()
+
+    logger.info("RENDER CHECKPOINT 11: BRep meshing completed")
 
     if not mesher.IsDone():
         raise RuntimeError("Open CASCADE B-Rep meshing failed.")
@@ -162,6 +188,7 @@ def render_step_view(
     default_rgb = _hex_to_rgb(base_color)
     highlight_rgb = _hex_to_rgb(highlight_color)
 
+    logger.info("RENDER CHECKPOINT 12: starting face triangulation extraction")    
     face_explorer = TopExp_Explorer(shape, TopAbs_FACE)
     face_index = 1
     triangle_count = 0
@@ -233,6 +260,10 @@ def render_step_view(
         face_index += 1
         face_explorer.Next()
 
+    logger.info(
+        f"RENDER CHECKPOINT 13: triangulation extraction completed, triangles={triangle_count}"
+    )  
+    
     if triangle_count == 0:
         raise RuntimeError(
             "Open CASCADE did not generate any display triangles."
@@ -319,7 +350,11 @@ def render_step_view(
     render_window.SetOffScreenRendering(1)
     render_window.SetSize(width, height)
     render_window.AddRenderer(renderer)
+    logger.info("RENDER CHECKPOINT 14: starting offscreen VTK render")
+
     render_window.Render()
+
+    logger.info("RENDER CHECKPOINT 15: offscreen VTK render completed")
 
     window_to_image = vtk.vtkWindowToImageFilter()
     window_to_image.SetInput(render_window)
@@ -330,7 +365,11 @@ def render_step_view(
     writer = vtk.vtkPNGWriter()
     writer.SetFileName(output_path)
     writer.SetInputConnection(window_to_image.GetOutputPort())
+    logger.info("RENDER CHECKPOINT 16: writing PNG")
+
     writer.Write()
+
+    logger.info("RENDER CHECKPOINT 17: PNG written")
 
     render_window.Finalize()
 
