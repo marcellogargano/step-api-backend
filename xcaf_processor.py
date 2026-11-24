@@ -2,9 +2,9 @@
 Minimal XCAF STEP assembly processor.
 
 This module is isolated from step_processor.py and performs the first XCAF
-validation stage: create a correctly initialized XCAF document, read a STEP
+validation stage: initialize an XCAF document through XCAFApp, read a STEP
 file with STEPCAFControl_Reader, transfer it into the document, obtain the
-ShapeTool, and enumerate the free/root shapes.
+ShapeTool, and enumerate free/root shapes.
 """
 
 import logging
@@ -17,7 +17,7 @@ try:
     from OCC.Core.TCollection import TCollection_ExtendedString
     from OCC.Core.TDF import TDF_Label, TDF_LabelSequence
     from OCC.Core.TDocStd import TDocStd_Document
-    from OCC.Core.XCAFApp import XCAFApp_Application_GetApplication
+    from OCC.Core.XCAFApp import XCAFApp_Application
     from OCC.Core.XCAFDoc import XCAFDoc_DocumentTool_ShapeTool
 
     XCAF_AVAILABLE = True
@@ -55,20 +55,28 @@ class XCAFProcessor:
         self._require_file(file_path)
 
         logger.info(
-            "XCAF 0: creating XCAF application and document"
+            "XCAF 0: obtaining XCAF application"
         )
 
-        application = XCAFApp_Application_GetApplication()
+        application = XCAFApp_Application.GetApplication()
 
         if application is None:
             raise RuntimeError(
                 "XCAF application is not available"
             )
 
+        logger.info(
+            "XCAF 0A: XCAF application obtained"
+        )
+
         document = TDocStd_Document(
             TCollection_ExtendedString(
                 "MDTV-XCAF"
             )
+        )
+
+        logger.info(
+            "XCAF 0B: document object created"
         )
 
         application.NewDocument(
@@ -79,22 +87,14 @@ class XCAFProcessor:
         )
 
         logger.info(
-            "XCAF 0A: XCAF document initialized"
+            "XCAF 0C: XCAF document initialized"
         )
 
         reader = STEPCAFControl_Reader()
 
-        reader.SetNameMode(
-            True
-        )
-
-        reader.SetColorMode(
-            True
-        )
-
-        reader.SetLayerMode(
-            True
-        )
+        reader.SetNameMode(True)
+        reader.SetColorMode(True)
+        reader.SetLayerMode(True)
 
         logger.info(
             "XCAF 1: reading STEP"
@@ -258,9 +258,7 @@ class XCAFProcessor:
                 False,
             )
 
-            component_count = (
-                components.Length()
-            )
+            component_count = components.Length()
 
         referred_definition = None
 
