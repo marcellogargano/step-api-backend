@@ -1254,3 +1254,86 @@ def render_step_svg(
     )
 
     return output_path
+
+
+def render_step_section_svg(
+    file_path,
+    output_path,
+    plane_origin,
+    plane_normal,
+    up_direction,
+    width=1600,
+    height=1000,
+    line_color="#000000",
+    fill_color="#D9D9D9",
+    background_color="#FFFFFF",
+    curve_samples=64,
+):
+    """Create a filled orthographic SVG of a true B-Rep planar section."""
+    from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
+    from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeFace
+    from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
+    from OCC.Core.GeomAbs import GeomAbs_Line
+    from OCC.Core.gp import gp_Dir, gp_Pln, gp_Pnt
+
+    for value, name in ((line_color, "line_color"), (fill_color, "fill_color"), (background_color, "background_color")):
+        _validate_color(value, name)
+    normal = _normalize(list(plane_normal))
+    requested_up = _normalize(list(up_direction))
+    right_raw = _cross(normal, requested_up)
+    if math.sqrt(_dot(right_raw, right_raw)) < 1.0e-12:
+        raise ValueError("plane_normal and up_direction cannot be parallel")
+    right = _normalize(list(right_raw))
+    up = _normalize(list(_cross(right, normal)))
+    shape = _read_and_mesh_step(file_path, 1.0, 0.35)
+    plane = gp_Pln(gp_Pnt(*[float(v) for v in plane_origin]), gp_Dir(*normal))
+    plane_face = BRepBuilderAPI_MakeFace(plane).Face()
+    section = BRepAlgoAPI_Section(shape, plane_face, False)
+    section.Approximation(True)
+    section.Build()
+    if not section.IsDone():
+        raise RuntimeError("Open CASCADE section operation failed")
+    section_shape = section.Shape()
+    polylines = []
+    explorer = TopExp_Explorer(section_shape, TopAbs_EDGE)
+    while explorer.More():
+        edge = topods.Edge(explorer.Current())
+        adaptor = BRepAdaptor_Curve(edge)
+        first = adaptor.FirstParameter()
+        last = adaptor.LastParameter()
+        if math.isfinite(first) and math.isfinite(last) and abs(last - first) > 1e-14:
+            sample_count = 2 if adaptor.GetType() == GeomAbs_Line else curve_samples
+            points_2d = []
+            for parameter in np.linspace(first, last, sample_count):
+                point = adaptor.Value(float(parameter))
+                point_3d = (point.X(), point.Y(), point.Z())
+                points_2d.append((_dot(point_3d, right), _dot(point_3d, up)))
+            if len(points_2d) >= 2:
+                polylines.append(points_2d)
+        explorer.Next()
+    if not polylines:
+        raise RuntimeError("The section plane does not intersect the STEP model")
+    all_points = [point for polyline in polylines for point in polyline]
+    xmin = min(point[0] for point in all_points); xmax = max(point[0] for point in all_points)
+    ymin = min(point[1] for point in all_points); ymax = max(point[1] for point in all_points)
+    span_x = max(xmax - xmin, 1e-9); span_y = max(ymax - ymin, 1e-9)
+    margin = 40.0
+    scale = min((width - 2 * margin) / span_x, (height - 2 * margin) / span_y)
+    xoff = (width - span_x * scale) / 2.0
+    yoff = (height - span_y * scale) / 2.0
+    def image(point):
+        return (xoff + (point[0] - xmin) * scale, height - (yoff + (point[1] - ymin) * scale))
+    paths = []
+    for polyline in polylines:
+        converted = [image(point) for point in polyline]
+        command = "M " + " L ".join("{:.3f} {:.3f}".format(x, y) for x, y in converted)
+        if math.hypot(converted[0][0] - converted[-1][0], converted[0][1] - converted[-1][1]) < 2.0:
+            command += " Z"
+        paths.append(command)
+    with open(output_path, "w", encoding="utf-8") as svg:
+        svg.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        svg.write('<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">\n'.format(width, height, width, height))
+        svg.write('<rect width="{}" height="{}" fill="{}"/>\n'.format(width, height, background_color))
+        svg.write('<path d="{}" fill="{}" fill-rule="evenodd" stroke="{}" stroke-width="1.5"/>\n'.format(" ".join(paths), fill_color, line_color))
+        svg.write('</svg>\n')
+    return output_path

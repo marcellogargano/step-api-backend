@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 
 from step_processor import STEPProcessor
 from xcaf_processor import XCAFProcessor
-from cad_renderer_cpu import render_step_svg
+from cad_renderer_cpu import render_step_svg, render_step_section_svg
 
 
 logging.basicConfig(level=logging.INFO)
@@ -29,7 +29,7 @@ app = FastAPI(
         "XCAF assembly analysis, face identification "
         "and orthographic CAD projection"
     ),
-    version="1.3.0",
+    version="1.4.0",
 )
 
 
@@ -118,7 +118,7 @@ async def root():
     return {
         "status": "healthy",
         "service": "STEP File Analysis API",
-        "version": "1.3.0",
+        "version": "1.4.0",
         "rendering": (
             "Open CASCADE B-Rep "
             "CPU projection with HLR"
@@ -149,6 +149,8 @@ async def health_check():
             "topology",
             "faces",
             "assembly",
+            "references",
+            "section",
             "validation",
             "cpu_projection",
             "hidden_line_removal",
@@ -484,6 +486,61 @@ async def analyze_assembly(
         safe_unlink(
             temp_file_path
         )
+
+
+@app.post("/analyze/references")
+async def analyze_references(file: UploadFile = File(...)) -> Dict[str, Any]:
+    file_ext = validate_step_filename(file.filename)
+    temp_file_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+            content = await file.read()
+            temp_file.write(content)
+            temp_file_path = temp_file.name
+        logger.info("Processing STEP references: %s (%s bytes)", file.filename, len(content))
+        result = xcaf_processor.analyze_references(temp_file_path)
+        result["original_filename"] = file.filename
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("STEP reference analysis failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="STEP reference analysis failed: {}".format(exc))
+    finally:
+        safe_unlink(temp_file_path)
+
+
+@app.post("/section-cpu")
+async def section_step_cpu(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    origin_x: float = Form(0.0), origin_y: float = Form(0.0), origin_z: float = Form(0.0),
+    normal_x: float = Form(0.0), normal_y: float = Form(0.0), normal_z: float = Form(1.0),
+    up_x: float = Form(0.0), up_y: float = Form(1.0), up_z: float = Form(0.0),
+    fill_color: str = Form("#D9D9D9"), line_color: str = Form("#000000"),
+    background_color: str = Form("#FFFFFF"), width: int = Form(1600), height: int = Form(1000),
+):
+    file_ext = validate_step_filename(file.filename)
+    step_path = None
+    svg_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_step:
+            content = await file.read(); temp_step.write(content); step_path = temp_step.name
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".svg") as temp_svg:
+            svg_path = temp_svg.name
+        render_step_section_svg(
+            step_path, svg_path, [origin_x, origin_y, origin_z], [normal_x, normal_y, normal_z],
+            [up_x, up_y, up_z], width, height, line_color, fill_color, background_color,
+        )
+        background_tasks.add_task(safe_unlink, step_path)
+        background_tasks.add_task(safe_unlink, svg_path)
+        return FileResponse(path=svg_path, media_type="image/svg+xml", filename="step_section.svg", background=background_tasks)
+    except HTTPException:
+        safe_unlink(step_path); safe_unlink(svg_path); raise
+    except Exception as exc:
+        logger.error("STEP section failed: %s", exc, exc_info=True)
+        safe_unlink(step_path); safe_unlink(svg_path)
+        raise HTTPException(status_code=500, detail="STEP section failed: {}".format(exc))
 
 
 @app.post("/render-cpu")
