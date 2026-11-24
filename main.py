@@ -9,263 +9,791 @@ import os
 import tempfile
 from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from step_processor import STEPProcessor
 from cad_renderer_cpu import render_step_svg
 
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 app = FastAPI(
     title="STEP File Analysis API",
-    description="Open CASCADE API for STEP B-Rep analysis, face identification and orthographic CAD projection",
-    version="1.1.0",
+    description=(
+        "Open CASCADE API for STEP B-Rep analysis, "
+        "face identification and orthographic CAD projection"
+    ),
+    version="1.2.0"
 )
+
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
+
 
 processor = STEPProcessor()
 
 
-def validate_step_filename(filename: Optional[str]) -> str:
+def validate_step_filename(
+    filename: Optional[str]
+) -> str:
+
     if not filename:
-        raise HTTPException(status_code=400, detail="No filename provided")
-    file_ext = os.path.splitext(filename)[1].lower()
-    if file_ext not in [".step", ".stp"]:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid file type. Expected .step or .stp, got {file_ext or 'no extension'}",
+            detail="No filename provided"
         )
+
+    file_ext = os.path.splitext(
+        filename
+    )[1].lower()
+
+    if file_ext not in [
+        ".step",
+        ".stp"
+    ]:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid file type. "
+                "Expected .step or .stp, "
+                "got {}".format(
+                    file_ext
+                    or "no extension"
+                )
+            )
+        )
+
     return file_ext
 
 
-def safe_unlink(file_path: Optional[str]) -> None:
-    if file_path and os.path.exists(file_path):
+def safe_unlink(
+    file_path: Optional[str]
+) -> None:
+
+    if (
+        file_path
+        and os.path.exists(
+            file_path
+        )
+    ):
+
         try:
-            os.unlink(file_path)
+            os.unlink(
+                file_path
+            )
+
         except Exception as exc:
-            logger.warning(f"Could not delete temporary file {file_path}: {exc}")
+            logger.warning(
+                "Could not delete temporary "
+                "file {}: {}".format(
+                    file_path,
+                    exc
+                )
+            )
 
 
-def parse_face_ids(face_text: str) -> list:
+def parse_face_ids(
+    face_text: str
+) -> list:
+
     if not face_text:
         return []
-    return [value.strip().upper() for value in face_text.split(",") if value.strip()]
+
+    return [
+        value.strip().upper()
+        for value
+        in face_text.split(",")
+        if value.strip()
+    ]
 
 
 @app.get("/")
 async def root():
+
     return {
         "status": "healthy",
         "service": "STEP File Analysis API",
-        "version": "1.1.0",
-        "rendering": "Open CASCADE B-Rep CPU projection",
+        "version": "1.2.0",
+        "rendering": (
+            "Open CASCADE B-Rep "
+            "CPU projection with HLR"
+        )
     }
 
 
 @app.get("/health")
 async def health_check():
+
     return {
         "status": "healthy",
-        "occt_available": processor.is_available(),
-        "supported_formats": ["STEP", "STP"],
-        "available_operations": ["geometry", "topology", "faces", "validation", "cpu_projection"],
+        "occt_available": (
+            processor.is_available()
+        ),
+        "supported_formats": [
+            "STEP",
+            "STP"
+        ],
+        "available_operations": [
+            "geometry",
+            "topology",
+            "faces",
+            "validation",
+            "cpu_projection",
+            "hidden_line_removal"
+        ]
     }
 
 
 @app.post("/analyze")
-async def analyze_step_file(file: UploadFile = File(...)) -> Dict[str, Any]:
-    file_ext = validate_step_filename(file.filename)
+async def analyze_step_file(
+    file: UploadFile = File(...)
+) -> Dict[str, Any]:
+
+    file_ext = (
+        validate_step_filename(
+            file.filename
+        )
+    )
+
     temp_file_path = None
+
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=file_ext
+        ) as temp_file:
+
             content = await file.read()
-            temp_file.write(content)
-            temp_file_path = temp_file.name
-        logger.info(f"Processing complete STEP analysis: {file.filename} ({len(content)} bytes)")
-        result = processor.analyze_file(temp_file_path)
-        result["file_info"]["original_filename"] = file.filename
+
+            temp_file.write(
+                content
+            )
+
+            temp_file_path = (
+                temp_file.name
+            )
+
+        logger.info(
+            "Processing complete STEP "
+            "analysis: {} ({} bytes)".format(
+                file.filename,
+                len(content)
+            )
+        )
+
+        result = (
+            processor.analyze_file(
+                temp_file_path
+            )
+        )
+
+        result[
+            "file_info"
+        ][
+            "original_filename"
+        ] = file.filename
+
         return result
+
     except HTTPException:
         raise
+
     except Exception as exc:
-        logger.error(f"Complete STEP analysis failed: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error processing STEP file: {exc}")
+
+        logger.error(
+            "Complete STEP analysis "
+            "failed: {}".format(
+                exc
+            ),
+            exc_info=True
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Error processing STEP "
+                "file: {}".format(
+                    exc
+                )
+            )
+        )
+
     finally:
-        safe_unlink(temp_file_path)
+
+        safe_unlink(
+            temp_file_path
+        )
 
 
 @app.post("/analyze/geometry")
-async def analyze_geometry_only(file: UploadFile = File(...)) -> Dict[str, Any]:
-    file_ext = validate_step_filename(file.filename)
+async def analyze_geometry_only(
+    file: UploadFile = File(...)
+) -> Dict[str, Any]:
+
+    file_ext = (
+        validate_step_filename(
+            file.filename
+        )
+    )
+
     temp_file_path = None
+
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=file_ext
+        ) as temp_file:
+
             content = await file.read()
-            temp_file.write(content)
-            temp_file_path = temp_file.name
-        logger.info(f"Processing STEP geometry: {file.filename} ({len(content)} bytes)")
-        return processor.get_geometric_properties(temp_file_path)
+
+            temp_file.write(
+                content
+            )
+
+            temp_file_path = (
+                temp_file.name
+            )
+
+        logger.info(
+            "Processing STEP geometry: "
+            "{} ({} bytes)".format(
+                file.filename,
+                len(content)
+            )
+        )
+
+        return (
+            processor
+            .get_geometric_properties(
+                temp_file_path
+            )
+        )
+
     except HTTPException:
         raise
+
     except Exception as exc:
-        logger.error(f"Geometry analysis failed: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Geometry analysis failed: {exc}")
+
+        logger.error(
+            "Geometry analysis failed: "
+            "{}".format(
+                exc
+            ),
+            exc_info=True
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Geometry analysis failed: "
+                "{}".format(
+                    exc
+                )
+            )
+        )
+
     finally:
-        safe_unlink(temp_file_path)
+
+        safe_unlink(
+            temp_file_path
+        )
 
 
 @app.post("/analyze/topology")
-async def analyze_topology_only(file: UploadFile = File(...)) -> Dict[str, Any]:
-    file_ext = validate_step_filename(file.filename)
+async def analyze_topology_only(
+    file: UploadFile = File(...)
+) -> Dict[str, Any]:
+
+    file_ext = (
+        validate_step_filename(
+            file.filename
+        )
+    )
+
     temp_file_path = None
+
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=file_ext
+        ) as temp_file:
+
             content = await file.read()
-            temp_file.write(content)
-            temp_file_path = temp_file.name
-        logger.info(f"Processing STEP topology: {file.filename} ({len(content)} bytes)")
-        return processor.get_topology_info(temp_file_path)
+
+            temp_file.write(
+                content
+            )
+
+            temp_file_path = (
+                temp_file.name
+            )
+
+        logger.info(
+            "Processing STEP topology: "
+            "{} ({} bytes)".format(
+                file.filename,
+                len(content)
+            )
+        )
+
+        return (
+            processor.get_topology_info(
+                temp_file_path
+            )
+        )
+
     except HTTPException:
         raise
+
     except Exception as exc:
-        logger.error(f"Topology analysis failed: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Topology analysis failed: {exc}")
+
+        logger.error(
+            "Topology analysis failed: "
+            "{}".format(
+                exc
+            ),
+            exc_info=True
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Topology analysis failed: "
+                "{}".format(
+                    exc
+                )
+            )
+        )
+
     finally:
-        safe_unlink(temp_file_path)
+
+        safe_unlink(
+            temp_file_path
+        )
 
 
 @app.post("/analyze/faces")
-async def analyze_faces(file: UploadFile = File(...)) -> Dict[str, Any]:
-    file_ext = validate_step_filename(file.filename)
+async def analyze_faces(
+    file: UploadFile = File(...)
+) -> Dict[str, Any]:
+
+    file_ext = (
+        validate_step_filename(
+            file.filename
+        )
+    )
+
     temp_file_path = None
+
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=file_ext
+        ) as temp_file:
+
             content = await file.read()
-            temp_file.write(content)
-            temp_file_path = temp_file.name
-        logger.info(f"Processing B-Rep faces: {file.filename} ({len(content)} bytes)")
-        result = processor.get_faces(temp_file_path)
-        result["original_filename"] = file.filename
+
+            temp_file.write(
+                content
+            )
+
+            temp_file_path = (
+                temp_file.name
+            )
+
+        logger.info(
+            "Processing B-Rep faces: "
+            "{} ({} bytes)".format(
+                file.filename,
+                len(content)
+            )
+        )
+
+        result = (
+            processor.get_faces(
+                temp_file_path
+            )
+        )
+
+        result[
+            "original_filename"
+        ] = file.filename
+
         return result
+
     except HTTPException:
         raise
+
     except Exception as exc:
-        logger.error(f"B-Rep face analysis failed: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"B-Rep face analysis failed: {exc}")
+
+        logger.error(
+            "B-Rep face analysis failed: "
+            "{}".format(
+                exc
+            ),
+            exc_info=True
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "B-Rep face analysis failed: "
+                "{}".format(
+                    exc
+                )
+            )
+        )
+
     finally:
-        safe_unlink(temp_file_path)
+
+        safe_unlink(
+            temp_file_path
+        )
 
 
 @app.post("/render-cpu")
 async def render_step_cpu(
     background_tasks: BackgroundTasks,
+
     file: UploadFile = File(...),
+
     view_x: float = Form(0.0),
     view_y: float = Form(0.0),
     view_z: float = Form(-1.0),
+
     up_x: float = Form(0.0),
     up_y: float = Form(1.0),
     up_z: float = Form(0.0),
+
     highlight_faces: str = Form(""),
     highlight_color: str = Form("#FF0000"),
+
     base_color: str = Form("#BFC5CC"),
-    edge_color: str = Form("#202020"),
+
+    edge_color: str = Form("#000000"),
+
     background_color: str = Form("#FFFFFF"),
+
+    show_hidden_edges: bool = Form(False),
+
+    hidden_edge_color: str = Form("#808080"),
+
     width: int = Form(1600),
     height: int = Form(1000),
+
     linear_deflection: float = Form(1.0),
-    angular_deflection: float = Form(0.35),
+    angular_deflection: float = Form(0.35)
 ):
-    file_ext = validate_step_filename(file.filename)
-    if width < 200 or width > 4000:
-        raise HTTPException(status_code=400, detail="Width must be between 200 and 4000 pixels")
-    if height < 200 or height > 4000:
-        raise HTTPException(status_code=400, detail="Height must be between 200 and 4000 pixels")
-    if linear_deflection <= 0 or angular_deflection <= 0:
-        raise HTTPException(status_code=400, detail="Mesh deflections must be greater than zero")
+
+    file_ext = (
+        validate_step_filename(
+            file.filename
+        )
+    )
+
+    if (
+        width < 200
+        or width > 4000
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Width must be between "
+                "200 and 4000 pixels"
+            )
+        )
+
+    if (
+        height < 200
+        or height > 4000
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Height must be between "
+                "200 and 4000 pixels"
+            )
+        )
+
+    if (
+        linear_deflection <= 0
+        or angular_deflection <= 0
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Mesh deflections must "
+                "be greater than zero"
+            )
+        )
 
     step_path = None
     svg_path = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_step:
-            content = await file.read()
-            temp_step.write(content)
-            step_path = temp_step.name
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".svg") as temp_svg:
-            svg_path = temp_svg.name
 
-        selected_faces = parse_face_ids(highlight_faces)
+    try:
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=file_ext
+        ) as temp_step:
+
+            content = await file.read()
+
+            temp_step.write(
+                content
+            )
+
+            step_path = (
+                temp_step.name
+            )
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=".svg"
+        ) as temp_svg:
+
+            svg_path = (
+                temp_svg.name
+            )
+
+        selected_faces = (
+            parse_face_ids(
+                highlight_faces
+            )
+        )
+
         logger.info(
-            f"CPU rendering STEP B-Rep: {file.filename} ({len(content)} bytes), "
-            f"view=[{view_x}, {view_y}, {view_z}], highlighted_faces={len(selected_faces)}"
+            "CPU rendering STEP B-Rep: "
+            "{} ({} bytes), "
+            "view=[{}, {}, {}], "
+            "highlighted_faces={}, "
+            "show_hidden_edges={}".format(
+                file.filename,
+                len(content),
+                view_x,
+                view_y,
+                view_z,
+                len(selected_faces),
+                show_hidden_edges
+            )
         )
 
         render_step_svg(
             file_path=step_path,
             output_path=svg_path,
-            view_direction=[view_x, view_y, view_z],
-            up_direction=[up_x, up_y, up_z],
-            highlight_faces=selected_faces,
-            highlight_color=highlight_color,
-            base_color=base_color,
-            edge_color=edge_color,
-            background_color=background_color,
+
+            view_direction=[
+                view_x,
+                view_y,
+                view_z
+            ],
+
+            up_direction=[
+                up_x,
+                up_y,
+                up_z
+            ],
+
+            highlight_faces=(
+                selected_faces
+            ),
+
+            highlight_color=(
+                highlight_color
+            ),
+
+            base_color=(
+                base_color
+            ),
+
+            edge_color=(
+                edge_color
+            ),
+
+            background_color=(
+                background_color
+            ),
+
             width=width,
+
             height=height,
-            linear_deflection=linear_deflection,
-            angular_deflection=angular_deflection,
+
+            linear_deflection=(
+                linear_deflection
+            ),
+
+            angular_deflection=(
+                angular_deflection
+            ),
+
+            show_hidden_edges=(
+                show_hidden_edges
+            ),
+
+            hidden_edge_color=(
+                hidden_edge_color
+            )
         )
 
-        background_tasks.add_task(safe_unlink, step_path)
-        background_tasks.add_task(safe_unlink, svg_path)
+        background_tasks.add_task(
+            safe_unlink,
+            step_path
+        )
+
+        background_tasks.add_task(
+            safe_unlink,
+            svg_path
+        )
+
         return FileResponse(
             path=svg_path,
             media_type="image/svg+xml",
             filename="step_projection.svg",
-            background=background_tasks,
+            background=background_tasks
         )
+
     except HTTPException:
-        safe_unlink(step_path)
-        safe_unlink(svg_path)
+
+        safe_unlink(
+            step_path
+        )
+
+        safe_unlink(
+            svg_path
+        )
+
         raise
+
     except Exception as exc:
-        logger.error(f"CPU STEP rendering failed: {exc}", exc_info=True)
-        safe_unlink(step_path)
-        safe_unlink(svg_path)
-        raise HTTPException(status_code=500, detail=f"CPU STEP rendering failed: {exc}")
+
+        logger.error(
+            "CPU STEP rendering failed: "
+            "{}".format(
+                exc
+            ),
+            exc_info=True
+        )
+
+        safe_unlink(
+            step_path
+        )
+
+        safe_unlink(
+            svg_path
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "CPU STEP rendering failed: "
+                "{}".format(
+                    exc
+                )
+            )
+        )
 
 
 @app.post("/validate")
-async def validate_step_file(file: UploadFile = File(...)) -> Dict[str, Any]:
-    file_ext = validate_step_filename(file.filename)
+async def validate_step_file(
+    file: UploadFile = File(...)
+) -> Dict[str, Any]:
+
+    file_ext = (
+        validate_step_filename(
+            file.filename
+        )
+    )
+
     temp_file_path = None
+
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=file_ext
+        ) as temp_file:
+
             content = await file.read()
-            temp_file.write(content)
-            temp_file_path = temp_file.name
-        logger.info(f"Validating STEP: {file.filename} ({len(content)} bytes)")
-        return processor.validate_file(temp_file_path)
+
+            temp_file.write(
+                content
+            )
+
+            temp_file_path = (
+                temp_file.name
+            )
+
+        logger.info(
+            "Validating STEP: "
+            "{} ({} bytes)".format(
+                file.filename,
+                len(content)
+            )
+        )
+
+        return (
+            processor.validate_file(
+                temp_file_path
+            )
+        )
+
     except HTTPException:
         raise
+
     except Exception as exc:
-        logger.error(f"STEP validation failed: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"STEP validation failed: {exc}")
+
+        logger.error(
+            "STEP validation failed: "
+            "{}".format(
+                exc
+            ),
+            exc_info=True
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "STEP validation failed: "
+                "{}".format(
+                    exc
+                )
+            )
+        )
+
     finally:
-        safe_unlink(temp_file_path)
+
+        safe_unlink(
+            temp_file_path
+        )
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
 
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000
+    )
