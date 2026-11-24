@@ -20,6 +20,7 @@ try:
     from OCC.Core.BRepBndLib import brepbndlib
     from OCC.Core.BRepCheck import BRepCheck_Analyzer
     from OCC.Core.BRepGProp import brepgprop
+
     from OCC.Core.GeomAbs import (
         GeomAbs_BSplineSurface,
         GeomAbs_BezierSurface,
@@ -29,14 +30,32 @@ try:
         GeomAbs_Sphere,
         GeomAbs_Torus,
     )
+
     from OCC.Core.GProp import GProp_GProps
     from OCC.Core.IFSelect import IFSelect_RetDone
     from OCC.Core.Quantity import Quantity_Color
-    from OCC.Core.STEPCAFControl import STEPCAFControl_Reader
-    from OCC.Core.STEPControl import STEPControl_Reader
-    from OCC.Core.TCollection import TCollection_ExtendedString
-    from OCC.Core.TDF import TDF_Label, TDF_LabelSequence
-    from OCC.Core.TDocStd import TDocStd_Document
+
+    from OCC.Core.STEPCAFControl import (
+        STEPCAFControl_Reader
+    )
+
+    from OCC.Core.STEPControl import (
+        STEPControl_Reader
+    )
+
+    from OCC.Core.TCollection import (
+        TCollection_ExtendedString
+    )
+
+    from OCC.Core.TDF import (
+        TDF_Label,
+        TDF_LabelSequence
+    )
+
+    from OCC.Core.TDocStd import (
+        TDocStd_Document
+    )
+
     from OCC.Core.TopAbs import (
         TopAbs_COMPOUND,
         TopAbs_EDGE,
@@ -45,9 +64,20 @@ try:
         TopAbs_SOLID,
         TopAbs_VERTEX,
     )
-    from OCC.Core.TopExp import TopExp_Explorer
-    from OCC.Core.TopLoc import TopLoc_Location
-    from OCC.Core.TopoDS import TopoDS_Shape, topods
+
+    from OCC.Core.TopExp import (
+        TopExp_Explorer
+    )
+
+    from OCC.Core.TopLoc import (
+        TopLoc_Location
+    )
+
+    from OCC.Core.TopoDS import (
+        TopoDS_Shape,
+        topods
+    )
+
     from OCC.Core.XCAFDoc import (
         XCAFDoc_ColorCurv,
         XCAFDoc_ColorGen,
@@ -57,32 +87,48 @@ try:
         XCAFDoc_DocumentTool_MaterialTool,
         XCAFDoc_DocumentTool_ShapeTool,
     )
-    from OCC.Extend.TopologyUtils import TopologyExplorer
+
+    from OCC.Extend.TopologyUtils import (
+        TopologyExplorer
+    )
 
     OCCT_AVAILABLE = True
 
-except ImportError:
+except ImportError as exc:
+
     OCCT_AVAILABLE = False
+    OCCT_IMPORT_ERROR = str(exc)
 
 
 logger = logging.getLogger(__name__)
 
 
 class STEPProcessor:
-    """Process STEP files and extract B-Rep and XCAF information."""
+    """
+    STEP and XCAF processor.
+    """
 
     def __init__(self):
 
-        if not OCCT_AVAILABLE:
-            logger.warning(
-                "pythonocc-core is not available"
-            )
-
         self.occt_available = OCCT_AVAILABLE
+
+        if not OCCT_AVAILABLE:
+
+            logger.warning(
+                "pythonocc-core is not available: %s",
+                globals().get(
+                    "OCCT_IMPORT_ERROR",
+                    "unknown import error"
+                )
+            )
 
     def is_available(self) -> bool:
 
         return self.occt_available
+
+    # ==========================================================
+    # PUBLIC API
+    # ==========================================================
 
     def analyze_file(
         self,
@@ -93,31 +139,45 @@ class STEPProcessor:
             file_path
         )
 
-        shape, metadata = self._read_step_file(
-            file_path
+        shape, metadata = (
+            self._read_step_file(
+                file_path
+            )
         )
 
         return {
             "file_info": {
-                "file_size_bytes": os.path.getsize(
-                    file_path
+                "file_size_bytes": (
+                    os.path.getsize(
+                        file_path
+                    )
                 ),
-                "file_path": os.path.basename(
-                    file_path
+                "file_path": (
+                    os.path.basename(
+                        file_path
+                    )
                 ),
             },
             "metadata": metadata,
-            "geometry": self._extract_geometric_properties(
-                shape
+            "geometry": (
+                self._extract_geometric_properties(
+                    shape
+                )
             ),
-            "topology": self._extract_topology_info(
-                shape
+            "topology": (
+                self._extract_topology_info(
+                    shape
+                )
             ),
-            "validation": self._validate_shape(
-                shape
+            "validation": (
+                self._validate_shape(
+                    shape
+                )
             ),
-            "assembly": self.get_assembly_structure(
-                file_path
+            "assembly": (
+                self.get_assembly_structure(
+                    file_path
+                )
             ),
         }
 
@@ -130,12 +190,16 @@ class STEPProcessor:
             file_path
         )
 
-        shape, _ = self._read_step_file(
-            file_path
+        shape, _ = (
+            self._read_step_file(
+                file_path
+            )
         )
 
-        return self._extract_geometric_properties(
-            shape
+        return (
+            self._extract_geometric_properties(
+                shape
+            )
         )
 
     def get_topology_info(
@@ -147,12 +211,16 @@ class STEPProcessor:
             file_path
         )
 
-        shape, _ = self._read_step_file(
-            file_path
+        shape, _ = (
+            self._read_step_file(
+                file_path
+            )
         )
 
-        return self._extract_topology_info(
-            shape
+        return (
+            self._extract_topology_info(
+                shape
+            )
         )
 
     def validate_file(
@@ -164,43 +232,62 @@ class STEPProcessor:
             file_path
         )
 
-        shape, _ = self._read_step_file(
-            file_path
+        shape, _ = (
+            self._read_step_file(
+                file_path
+            )
         )
 
-        return self._validate_shape(
-            shape
+        return (
+            self._validate_shape(
+                shape
+            )
         )
+
+    # ==========================================================
+    # FACE ANALYSIS
+    # ==========================================================
 
     def get_faces(
         self,
         file_path: str
     ) -> Dict[str, Any]:
-        """
-        Return sequential B-Rep face data for the complete
-        transferred shape.
-        """
 
         self._require_file(
             file_path
         )
 
-        shape, metadata = self._read_step_file(
-            file_path
+        shape, metadata = (
+            self._read_step_file(
+                file_path
+            )
         )
 
         surface_names = {
-            GeomAbs_Plane: "PLANE",
-            GeomAbs_Cylinder: "CYLINDER",
-            GeomAbs_Cone: "CONE",
-            GeomAbs_Sphere: "SPHERE",
-            GeomAbs_Torus: "TORUS",
-            GeomAbs_BezierSurface: "BEZIER_SURFACE",
-            GeomAbs_BSplineSurface: "BSPLINE_SURFACE",
+            GeomAbs_Plane:
+                "PLANE",
+
+            GeomAbs_Cylinder:
+                "CYLINDER",
+
+            GeomAbs_Cone:
+                "CONE",
+
+            GeomAbs_Sphere:
+                "SPHERE",
+
+            GeomAbs_Torus:
+                "TORUS",
+
+            GeomAbs_BezierSurface:
+                "BEZIER_SURFACE",
+
+            GeomAbs_BSplineSurface:
+                "BSPLINE_SURFACE",
         }
 
-        faces: List[Dict[str, Any]] = []
-        errors: List[Dict[str, Any]] = []
+        faces = []
+        errors = []
 
         explorer = TopExp_Explorer(
             shape,
@@ -217,25 +304,39 @@ class STEPProcessor:
                     explorer.Current()
                 )
 
-                props = GProp_GProps()
+                properties = (
+                    GProp_GProps()
+                )
 
                 brepgprop.SurfaceProperties(
                     face,
-                    props
+                    properties
                 )
 
-                centroid = props.CentreOfMass()
-
-                adaptor = BRepAdaptor_Surface(
-                    face
+                area = (
+                    properties.Mass()
                 )
 
-                surface_type = surface_names.get(
-                    adaptor.GetType(),
-                    "OTHER"
+                centroid = (
+                    properties.CentreOfMass()
                 )
 
-                bounding_box = Bnd_Box()
+                adaptor = (
+                    BRepAdaptor_Surface(
+                        face
+                    )
+                )
+
+                surface_type = (
+                    surface_names.get(
+                        adaptor.GetType(),
+                        "OTHER"
+                    )
+                )
+
+                bounding_box = (
+                    Bnd_Box()
+                )
 
                 brepbndlib.Add(
                     face,
@@ -251,113 +352,204 @@ class STEPProcessor:
                     zmax
                 ) = bounding_box.Get()
 
-                face_data: Dict[str, Any] = {
-                    "face_id": "FACE_{}".format(
-                        face_index
-                    ),
-                    "index": face_index,
-                    "surface_type": surface_type,
+                face_data = {
+                    "face_id":
+                        "FACE_{}".format(
+                            face_index
+                        ),
+
+                    "index":
+                        face_index,
+
+                    "surface_type":
+                        surface_type,
+
                     "area": {
-                        "value": props.Mass(),
-                        "unit": "square_mm",
+                        "value":
+                            area,
+
+                        "unit":
+                            "square_mm"
                     },
+
                     "centroid": {
-                        "x": centroid.X(),
-                        "y": centroid.Y(),
-                        "z": centroid.Z(),
-                        "unit": "mm",
+                        "x":
+                            centroid.X(),
+
+                        "y":
+                            centroid.Y(),
+
+                        "z":
+                            centroid.Z(),
+
+                        "unit":
+                            "mm"
                     },
+
                     "bounding_box": {
                         "min": {
                             "x": xmin,
                             "y": ymin,
-                            "z": zmin,
+                            "z": zmin
                         },
+
                         "max": {
                             "x": xmax,
                             "y": ymax,
-                            "z": zmax,
+                            "z": zmax
                         },
-                        "unit": "mm",
-                    },
+
+                        "unit":
+                            "mm"
+                    }
                 }
 
                 if surface_type == "PLANE":
 
-                    plane = adaptor.Plane()
+                    plane = (
+                        adaptor.Plane()
+                    )
 
                     normal = (
                         plane.Axis()
                         .Direction()
                     )
 
-                    location = plane.Location()
+                    location = (
+                        plane.Location()
+                    )
 
-                    face_data["plane"] = {
+                    face_data[
+                        "plane"
+                    ] = {
                         "normal": {
-                            "x": normal.X(),
-                            "y": normal.Y(),
-                            "z": normal.Z(),
+                            "x":
+                                normal.X(),
+
+                            "y":
+                                normal.Y(),
+
+                            "z":
+                                normal.Z()
                         },
+
                         "location": {
-                            "x": location.X(),
-                            "y": location.Y(),
-                            "z": location.Z(),
-                        },
+                            "x":
+                                location.X(),
+
+                            "y":
+                                location.Y(),
+
+                            "z":
+                                location.Z()
+                        }
                     }
 
                 elif surface_type == "CYLINDER":
 
-                    cylinder = adaptor.Cylinder()
+                    cylinder = (
+                        adaptor.Cylinder()
+                    )
 
-                    axis = cylinder.Axis()
-                    direction = axis.Direction()
-                    location = axis.Location()
+                    axis = (
+                        cylinder.Axis()
+                    )
 
-                    face_data["cylinder"] = {
-                        "radius": cylinder.Radius(),
+                    direction = (
+                        axis.Direction()
+                    )
+
+                    location = (
+                        axis.Location()
+                    )
+
+                    face_data[
+                        "cylinder"
+                    ] = {
+                        "radius":
+                            cylinder.Radius(),
+
                         "axis_direction": {
-                            "x": direction.X(),
-                            "y": direction.Y(),
-                            "z": direction.Z(),
+                            "x":
+                                direction.X(),
+
+                            "y":
+                                direction.Y(),
+
+                            "z":
+                                direction.Z()
                         },
+
                         "axis_location": {
-                            "x": location.X(),
-                            "y": location.Y(),
-                            "z": location.Z(),
-                        },
+                            "x":
+                                location.X(),
+
+                            "y":
+                                location.Y(),
+
+                            "z":
+                                location.Z()
+                        }
                     }
 
                 elif surface_type == "CONE":
 
-                    cone = adaptor.Cone()
+                    cone = (
+                        adaptor.Cone()
+                    )
 
-                    face_data["cone"] = {
-                        "reference_radius": cone.RefRadius(),
-                        "semi_angle_rad": cone.SemiAngle(),
+                    face_data[
+                        "cone"
+                    ] = {
+                        "reference_radius":
+                            cone.RefRadius(),
+
+                        "semi_angle_rad":
+                            cone.SemiAngle()
                     }
 
                 elif surface_type == "SPHERE":
 
-                    sphere = adaptor.Sphere()
-                    location = sphere.Location()
+                    sphere = (
+                        adaptor.Sphere()
+                    )
 
-                    face_data["sphere"] = {
-                        "radius": sphere.Radius(),
+                    location = (
+                        sphere.Location()
+                    )
+
+                    face_data[
+                        "sphere"
+                    ] = {
+                        "radius":
+                            sphere.Radius(),
+
                         "center": {
-                            "x": location.X(),
-                            "y": location.Y(),
-                            "z": location.Z(),
-                        },
+                            "x":
+                                location.X(),
+
+                            "y":
+                                location.Y(),
+
+                            "z":
+                                location.Z()
+                        }
                     }
 
                 elif surface_type == "TORUS":
 
-                    torus = adaptor.Torus()
+                    torus = (
+                        adaptor.Torus()
+                    )
 
-                    face_data["torus"] = {
-                        "major_radius": torus.MajorRadius(),
-                        "minor_radius": torus.MinorRadius(),
+                    face_data[
+                        "torus"
+                    ] = {
+                        "major_radius":
+                            torus.MajorRadius(),
+
+                        "minor_radius":
+                            torus.MinorRadius()
                     }
 
                 faces.append(
@@ -374,31 +566,48 @@ class STEPProcessor:
 
                 errors.append(
                     {
-                        "face_id": "FACE_{}".format(
-                            face_index
-                        ),
-                        "error": str(exc),
+                        "face_id":
+                            "FACE_{}".format(
+                                face_index
+                            ),
+
+                        "error":
+                            str(exc)
                     }
                 )
 
             face_index += 1
+
             explorer.Next()
 
         return {
-            "metadata": metadata,
-            "face_count": len(faces),
-            "failed_face_count": len(errors),
-            "faces": faces,
-            "errors": errors,
+            "metadata":
+                metadata,
+
+            "face_count":
+                len(faces),
+
+            "failed_face_count":
+                len(errors),
+
+            "faces":
+                faces,
+
+            "errors":
+                errors
         }
+
+    # ==========================================================
+    # XCAF ASSEMBLY
+    # ==========================================================
 
     def get_assembly_structure(
         self,
         file_path: str
     ) -> Dict[str, Any]:
         """
-        Read a STEP file into XCAF and return its complete
-        assembly instance tree.
+        Read STEP using STEPCAFControl and reconstruct the
+        assembly/component instance tree.
         """
 
         self._require_file(
@@ -411,7 +620,9 @@ class STEPProcessor:
             )
         )
 
-        reader = STEPCAFControl_Reader()
+        reader = (
+            STEPCAFControl_Reader()
+        )
 
         reader.SetColorMode(
             True
@@ -434,19 +645,24 @@ class STEPProcessor:
         )
 
         if status != IFSelect_RetDone:
+
             raise ValueError(
-                "XCAF failed to read STEP file: {}".format(
+                "XCAF failed to read STEP file: "
+                "{}".format(
                     file_path
                 )
             )
 
-        transferred = reader.Transfer(
-            document
+        transferred = (
+            reader.Transfer(
+                document
+            )
         )
 
         if transferred is False:
+
             raise RuntimeError(
-                "XCAF failed to transfer the STEP document"
+                "XCAF failed to transfer STEP document"
             )
 
         shape_tool = (
@@ -473,44 +689,62 @@ class STEPProcessor:
             )
         )
 
-        root_labels = TDF_LabelSequence()
+        root_labels = (
+            TDF_LabelSequence()
+        )
 
         shape_tool.GetFreeShapes(
             root_labels
         )
 
-        roots: List[Dict[str, Any]] = []
-        flat_nodes: List[Dict[str, Any]] = []
+        roots = []
+        flat_nodes = []
 
         definition_ids = set()
 
-        layer_names = self._collect_layer_names(
-            layer_tool
+        layers = (
+            self._collect_layer_names(
+                layer_tool
+            )
         )
 
-        identity_location = TopLoc_Location()
+        identity_location = (
+            TopLoc_Location()
+        )
 
-        for index in range(
+        for root_index in range(
             1,
             root_labels.Length() + 1
         ):
 
-            root_label = root_labels.Value(
-                index
+            root_label = (
+                root_labels.Value(
+                    root_index
+                )
             )
 
-            root_node = self._walk_xcaf_node(
-                label=root_label,
-                shape_tool=shape_tool,
-                color_tool=color_tool,
-                parent_id=None,
-                depth=0,
-                instance_path="ROOT_{}".format(
-                    index
-                ),
-                parent_location=identity_location,
-                flat_nodes=flat_nodes,
-                definition_ids=definition_ids,
+            root_node = (
+                self._walk_xcaf_node(
+                    label=root_label,
+                    shape_tool=shape_tool,
+                    color_tool=color_tool,
+                    parent_id=None,
+                    depth=0,
+                    instance_path=(
+                        "ROOT_{}".format(
+                            root_index
+                        )
+                    ),
+                    parent_location=(
+                        identity_location
+                    ),
+                    flat_nodes=(
+                        flat_nodes
+                    ),
+                    definition_ids=(
+                        definition_ids
+                    )
+                )
             )
 
             roots.append(
@@ -520,24 +754,25 @@ class STEPProcessor:
         instance_count = sum(
             1
             for node in flat_nodes
-            if node["is_reference"]
+            if node[
+                "is_reference"
+            ]
         )
 
         assembly_count = sum(
             1
             for node in flat_nodes
-            if node["is_assembly"]
+            if node[
+                "is_assembly"
+            ]
         )
 
         simple_shape_count = sum(
             1
             for node in flat_nodes
-            if node["is_simple_shape"]
-        )
-
-        solid_count = sum(
-            node["topology"]["solids"]
-            for node in flat_nodes
+            if node[
+                "is_simple_shape"
+            ]
         )
 
         return {
@@ -545,29 +780,60 @@ class STEPProcessor:
                 assembly_count > 0
                 or instance_count > 0
             ),
-            "root_count": len(roots),
-            "node_count": len(flat_nodes),
-            "assembly_count": assembly_count,
-            "instance_count": instance_count,
-            "definition_count": len(
-                definition_ids
-            ),
-            "simple_shape_count": simple_shape_count,
-            "solid_count_in_nodes": solid_count,
-            "layers": layer_names,
-            "roots": roots,
-            "flat_nodes": flat_nodes,
-            "capabilities": {
-                "names": True,
-                "hierarchy": True,
-                "local_transform": True,
-                "global_transform": True,
-                "colors": True,
-                "layers": True,
-                "materials_tool_loaded": (
-                    material_tool is not None
+
+            "root_count":
+                len(roots),
+
+            "node_count":
+                len(flat_nodes),
+
+            "assembly_count":
+                assembly_count,
+
+            "instance_count":
+                instance_count,
+
+            "definition_count":
+                len(
+                    definition_ids
                 ),
-            },
+
+            "simple_shape_count":
+                simple_shape_count,
+
+            "layers":
+                layers,
+
+            "roots":
+                roots,
+
+            "flat_nodes":
+                flat_nodes,
+
+            "capabilities": {
+                "names":
+                    True,
+
+                "hierarchy":
+                    True,
+
+                "local_transform":
+                    True,
+
+                "global_transform":
+                    True,
+
+                "colors":
+                    True,
+
+                "layers":
+                    True,
+
+                "materials_tool_loaded": (
+                    material_tool
+                    is not None
+                )
+            }
         }
 
     def _walk_xcaf_node(
@@ -579,20 +845,20 @@ class STEPProcessor:
         depth: int,
         instance_path: str,
         parent_location,
-        flat_nodes: List[Dict[str, Any]],
+        flat_nodes,
         definition_ids
     ) -> Dict[str, Any]:
-        """
-        Recursively walk one XCAF label and follow
-        assembly-component references.
-        """
 
-        node_id = self._label_entry(
-            label
+        node_id = (
+            self._label_entry(
+                label
+            )
         )
 
-        name = self._label_name(
-            label
+        name = (
+            self._label_name(
+                label
+            )
         )
 
         is_reference = bool(
@@ -631,59 +897,105 @@ class STEPProcessor:
             )
         )
 
-        definition_id = node_id
-        definition_name = name
         source_label = label
+
+        definition_id = (
+            node_id
+        )
+
+        definition_name = (
+            name
+        )
 
         if is_reference:
 
-            referred_label = TDF_Label()
+            referred_label = (
+                TDF_Label()
+            )
 
-            if shape_tool.GetReferredShape(
-                label,
-                referred_label
-            ):
+            referred_ok = (
+                shape_tool.GetReferredShape(
+                    label,
+                    referred_label
+                )
+            )
 
-                source_label = referred_label
+            if referred_ok:
 
-                definition_id = self._label_entry(
+                source_label = (
                     referred_label
                 )
 
-                definition_name = self._label_name(
-                    referred_label
+                definition_id = (
+                    self._label_entry(
+                        referred_label
+                    )
+                )
+
+                definition_name = (
+                    self._label_name(
+                        referred_label
+                    )
                 )
 
         definition_ids.add(
             definition_id
         )
 
-        shape = shape_tool.GetShape(
-            source_label
+        shape = (
+            shape_tool.GetShape(
+                source_label
+            )
         )
 
-        topology = self._shape_topology_summary(
-            shape
+        topology = (
+            self._shape_topology_summary(
+                shape
+            )
         )
 
-        effective_color = self._get_xcaf_color(
-            label,
-            source_label,
-            color_tool
+        color = (
+            self._get_xcaf_color(
+                label,
+                source_label,
+                color_tool
+            )
         )
 
-        node: Dict[str, Any] = {
-            "component_id": node_id,
-            "instance_path": instance_path,
-            "parent_id": parent_id,
-            "depth": depth,
-            "name": name,
-            "definition_id": definition_id,
-            "definition_name": definition_name,
-            "is_reference": is_reference,
-            "is_assembly": is_assembly,
-            "is_simple_shape": is_simple_shape,
-            "is_free_shape": is_free_shape,
+        node = {
+            "component_id":
+                node_id,
+
+            "instance_path":
+                instance_path,
+
+            "parent_id":
+                parent_id,
+
+            "depth":
+                depth,
+
+            "name":
+                name,
+
+            "definition_id":
+                definition_id,
+
+            "definition_name":
+                definition_name,
+
+            "is_reference":
+                is_reference,
+
+            "is_assembly":
+                is_assembly,
+
+            "is_simple_shape":
+                is_simple_shape,
+
+            "is_free_shape":
+                is_free_shape,
+
             "shape_type": (
                 None
                 if shape.IsNull()
@@ -691,35 +1003,52 @@ class STEPProcessor:
                     shape.ShapeType()
                 )
             ),
-            "topology": topology,
-            "local_transform": self._location_to_dict(
-                local_location
-            ),
-            "global_transform": self._location_to_dict(
-                global_location
-            ),
-            "color": effective_color,
-            "children": [],
+
+            "topology":
+                topology,
+
+            "local_transform":
+                self._location_to_dict(
+                    local_location
+                ),
+
+            "global_transform":
+                self._location_to_dict(
+                    global_location
+                ),
+
+            "color":
+                color,
+
+            "children":
+                []
         }
 
         flat_nodes.append(
             {
                 key: value
-                for key, value in node.items()
+                for key, value
+                in node.items()
                 if key != "children"
             }
         )
 
         if is_reference:
-            children_label = source_label
+            children_label = (
+                source_label
+            )
         else:
-            children_label = label
-
-        components = TDF_LabelSequence()
+            children_label = (
+                label
+            )
 
         if shape_tool.IsAssembly(
             children_label
         ):
+
+            components = (
+                TDF_LabelSequence()
+            )
 
             shape_tool.GetComponents(
                 children_label,
@@ -732,32 +1061,54 @@ class STEPProcessor:
                 components.Length() + 1
             ):
 
-                child_label = components.Value(
-                    child_index
+                child_label = (
+                    components.Value(
+                        child_index
+                    )
                 )
 
-                child_path = "{}/{}".format(
-                    instance_path,
-                    child_index
+                child_path = (
+                    "{}/{}".format(
+                        instance_path,
+                        child_index
+                    )
                 )
 
-                child_node = self._walk_xcaf_node(
-                    label=child_label,
-                    shape_tool=shape_tool,
-                    color_tool=color_tool,
-                    parent_id=node_id,
-                    depth=depth + 1,
-                    instance_path=child_path,
-                    parent_location=global_location,
-                    flat_nodes=flat_nodes,
-                    definition_ids=definition_ids,
+                child_node = (
+                    self._walk_xcaf_node(
+                        label=child_label,
+                        shape_tool=shape_tool,
+                        color_tool=color_tool,
+                        parent_id=node_id,
+                        depth=(
+                            depth + 1
+                        ),
+                        instance_path=(
+                            child_path
+                        ),
+                        parent_location=(
+                            global_location
+                        ),
+                        flat_nodes=(
+                            flat_nodes
+                        ),
+                        definition_ids=(
+                            definition_ids
+                        )
+                    )
                 )
 
-                node["children"].append(
+                node[
+                    "children"
+                ].append(
                     child_node
                 )
 
         return node
+
+    # ==========================================================
+    # XCAF HELPERS
+    # ==========================================================
 
     def _label_entry(
         self,
@@ -765,10 +1116,17 @@ class STEPProcessor:
     ) -> str:
 
         try:
-            return label.EntryDumpToString()
+
+            return (
+                label
+                .EntryDumpToString()
+            )
 
         except Exception:
-            return "UNKNOWN_LABEL"
+
+            return (
+                "UNKNOWN_LABEL"
+            )
 
     def _label_name(
         self,
@@ -777,16 +1135,24 @@ class STEPProcessor:
 
         try:
 
-            name = label.GetLabelName()
+            name = (
+                label.GetLabelName()
+            )
 
             if name:
-                return str(name)
+
+                return str(
+                    name
+                )
 
         except Exception:
+
             pass
 
-        return self._label_entry(
-            label
+        return (
+            self._label_entry(
+                label
+            )
         )
 
     def _shape_topology_summary(
@@ -794,22 +1160,23 @@ class STEPProcessor:
         shape
     ) -> Dict[str, int]:
 
-        summary = {
+        topology = {
             "solids": 0,
             "shells": 0,
             "faces": 0,
             "edges": 0,
             "vertices": 0,
-            "compounds": 0,
+            "compounds": 0
         }
 
         if (
             shape is None
             or shape.IsNull()
         ):
-            return summary
 
-        type_map = (
+            return topology
+
+        entries = (
             (
                 "solids",
                 TopAbs_SOLID
@@ -833,14 +1200,19 @@ class STEPProcessor:
             (
                 "compounds",
                 TopAbs_COMPOUND
-            ),
+            )
         )
 
-        for key, shape_type in type_map:
+        for (
+            name,
+            shape_type
+        ) in entries:
 
-            explorer = TopExp_Explorer(
-                shape,
-                shape_type
+            explorer = (
+                TopExp_Explorer(
+                    shape,
+                    shape_type
+                )
             )
 
             count = 0
@@ -848,11 +1220,14 @@ class STEPProcessor:
             while explorer.More():
 
                 count += 1
+
                 explorer.Next()
 
-            summary[key] = count
+            topology[
+                name
+            ] = count
 
-        return summary
+        return topology
 
     def _get_xcaf_color(
         self,
@@ -873,10 +1248,10 @@ class STEPProcessor:
             (
                 "curve",
                 XCAFDoc_ColorCurv
-            ),
+            )
         )
 
-        label_sources = (
+        sources = (
             (
                 "instance",
                 instance_label
@@ -884,60 +1259,89 @@ class STEPProcessor:
             (
                 "definition",
                 definition_label
-            ),
+            )
         )
 
-        for source_name, label in label_sources:
+        for (
+            source_name,
+            label
+        ) in sources:
 
-            for color_kind, color_type in color_types:
+            for (
+                color_type_name,
+                color_type
+            ) in color_types:
 
-                color = Quantity_Color()
+                color = (
+                    Quantity_Color()
+                )
 
                 try:
 
-                    has_color = color_tool.GetColor(
-                        label,
-                        color_type,
-                        color
+                    found = (
+                        color_tool.GetColor(
+                            label,
+                            color_type,
+                            color
+                        )
                     )
 
-                    if has_color:
+                    if found:
 
-                        red = color.Red()
-                        green = color.Green()
-                        blue = color.Blue()
+                        red = (
+                            color.Red()
+                        )
+
+                        green = (
+                            color.Green()
+                        )
+
+                        blue = (
+                            color.Blue()
+                        )
 
                         return {
-                            "source": source_name,
-                            "type": color_kind,
+                            "source":
+                                source_name,
+
+                            "type":
+                                color_type_name,
+
                             "rgb": {
                                 "r": red,
                                 "g": green,
-                                "b": blue,
+                                "b": blue
                             },
+
                             "hex": (
                                 "#{:02X}{:02X}{:02X}"
                                 .format(
                                     int(
                                         round(
-                                            red * 255.0
+                                            red
+                                            * 255.0
                                         )
                                     ),
+
                                     int(
                                         round(
-                                            green * 255.0
+                                            green
+                                            * 255.0
                                         )
                                     ),
+
                                     int(
                                         round(
-                                            blue * 255.0
+                                            blue
+                                            * 255.0
                                         )
-                                    ),
+                                    )
                                 )
-                            ),
+                            )
                         }
 
                 except Exception:
+
                     continue
 
         return None
@@ -945,11 +1349,19 @@ class STEPProcessor:
     def _collect_layer_names(
         self,
         layer_tool
-    ) -> Listlayers: List[str] = []
+    ) -> List[str]:
+        """
+        Return the XCAF layer labels/names available
+        in the imported STEP document.
+        """
+
+        layers: List[str] = []
 
         try:
 
-            labels = TDF_LabelSequence()
+            labels = (
+                TDF_LabelSequence()
+            )
 
             layer_tool.GetLayerLabels(
                 labels
@@ -960,15 +1372,20 @@ class STEPProcessor:
                 labels.Length() + 1
             ):
 
-                label = labels.Value(
-                    index
+                label = (
+                    labels.Value(
+                        index
+                    )
                 )
 
-                name = self._label_name(
-                    label
+                name = (
+                    self._label_name(
+                        label
+                    )
                 )
 
                 if name not in layers:
+
                     layers.append(
                         name
                     )
@@ -987,51 +1404,72 @@ class STEPProcessor:
         location
     ) -> Dict[str, Any]:
 
-        transform = (
+        transformation = (
             location.Transformation()
         )
 
-        matrix = [
-            [
-                transform.Value(
-                    row,
-                    column
-                )
-                for column in range(
-                    1,
-                    5
-                )
-            ]
-            for row in range(
+        matrix = []
+
+        for row in range(
+            1,
+            4
+        ):
+
+            matrix_row = []
+
+            for column in range(
                 1,
-                4
+                5
+            ):
+
+                matrix_row.append(
+                    transformation.Value(
+                        row,
+                        column
+                    )
+                )
+
+            matrix.append(
+                matrix_row
             )
-        ]
 
         matrix.append(
             [
                 0.0,
                 0.0,
                 0.0,
-                1.0,
+                1.0
             ]
         )
 
         translation = (
-            transform.TranslationPart()
+            transformation
+            .TranslationPart()
         )
 
         return {
             "is_identity": bool(
                 location.IsIdentity()
             ),
-            "matrix_4x4": matrix,
+
+            "matrix_4x4":
+                matrix,
+
             "translation_mm": {
-                "x": translation.X(),
-                "y": translation.Y(),
-                "z": translation.Z(),
-            },
+                "x":
+                    translation.X(),
+
+                "y":
+                    translation.Y(),
+
+                "z":
+                    translation.Z()
+            }
         }
+
+    # ==========================================================
+    # FILE / STEP READER
+    # ==========================================================
 
     def _require_file(
         self,
@@ -1039,6 +1477,7 @@ class STEPProcessor:
     ) -> None:
 
         if not self.occt_available:
+
             raise RuntimeError(
                 "pythonocc-core is not installed"
             )
@@ -1046,6 +1485,7 @@ class STEPProcessor:
         if not os.path.exists(
             file_path
         ):
+
             raise FileNotFoundError(
                 "File not found: {}".format(
                     file_path
@@ -1060,30 +1500,36 @@ class STEPProcessor:
         Dict[str, Any]
     ]:
 
-        step_reader = STEPControl_Reader()
+        reader = (
+            STEPControl_Reader()
+        )
 
-        status = step_reader.ReadFile(
-            file_path
+        status = (
+            reader.ReadFile(
+                file_path
+            )
         )
 
         if status != IFSelect_RetDone:
+
             raise ValueError(
-                "Failed to read STEP file: {}".format(
+                "Failed to read STEP file: "
+                "{}".format(
                     file_path
                 )
             )
 
-        step_reader.PrintCheckLoad(
+        reader.PrintCheckLoad(
             False,
             IFSelect_RetDone
         )
 
         root_count = (
-            step_reader
+            reader
             .NbRootsForTransfer()
         )
 
-        step_reader.PrintCheckTransfer(
+        reader.PrintCheckTransfer(
             False,
             IFSelect_RetDone
         )
@@ -1094,65 +1540,89 @@ class STEPProcessor:
         )
 
         transferred = (
-            step_reader.TransferRoots()
+            reader.TransferRoots()
         )
 
         if transferred <= 0:
+
             raise RuntimeError(
-                "Open CASCADE did not transfer any STEP roots"
+                "Open CASCADE did not transfer "
+                "any STEP roots"
             )
 
         shape = (
-            step_reader.OneShape()
+            reader.OneShape()
         )
 
         if shape.IsNull():
+
             raise RuntimeError(
-                "Open CASCADE returned a null STEP shape"
+                "Open CASCADE returned "
+                "a null STEP shape"
             )
 
         return (
             shape,
             {
-                "nb_roots": root_count,
-                "transfer_status": "success",
-            },
+                "nb_roots":
+                    root_count,
+
+                "transfer_status":
+                    "success"
+            }
         )
+
+    # ==========================================================
+    # GEOMETRIC PROPERTIES
+    # ==========================================================
 
     def _extract_geometric_properties(
         self,
         shape: TopoDS_Shape
     ) -> Dict[str, Any]:
 
-        properties: Dict[
-            str,
-            Any
-        ] = {}
+        properties = {}
 
         try:
 
-            props = GProp_GProps()
+            props = (
+                GProp_GProps()
+            )
 
             brepgprop.VolumeProperties(
                 shape,
                 props
             )
 
-            center = props.CentreOfMass()
+            center = (
+                props.CentreOfMass()
+            )
 
-            properties["volume"] = {
-                "value": props.Mass(),
-                "unit": "cubic_mm",
+            properties[
+                "volume"
+            ] = {
+                "value":
+                    props.Mass(),
+
+                "unit":
+                    "cubic_mm"
             }
 
             properties[
                 "center_of_mass"
             ] = {
-                "x": center.X(),
-                "y": center.Y(),
-                "z": center.Z(),
-                "unit": "mm",
-            }
+                "x":
+                    center.X(),
+
+                "y":
+                    center.Y(),
+
+                "z":
+       "z":
+                    center.Z(),
+
+                "unit":
+          }
 
         except Exception as exc:
 
@@ -1161,35 +1631,52 @@ class STEPProcessor:
                 exc
             )
 
-            properties["volume"] = None
-            properties["center_of_mass"] = None
+            properties[
+                "volume"
+            ] = None
+
+            properties[
+                "center_of_mass"
+            ] = None
 
         try:
 
-            props = GProp_GProps()
+            props = (
+                GProp_GProps()
+            )
 
             brepgprop.SurfaceProperties(
                 shape,
                 props
             )
 
-            properties["surface_area"] = {
-                "value": props.Mass(),
-                "unit": "square_mm",
+            properties[
+                "surface_area"
+            ] = {
+                "value":
+                    props.Mass(),
+
+                "unit":
+                    "square_mm"
             }
 
         except Exception as exc:
 
             logger.warning(
-                "Could not calculate surface area: %s",
+                "Could not calculate "
+                "surface area: %s",
                 exc
             )
 
-            properties["surface_area"] = None
+            properties[
+                "surface_area"
+            ] = None
 
         try:
 
-            bounding_box = Bnd_Box()
+            bounding_box = (
+                Bnd_Box()
+            )
 
             brepbndlib.Add(
                 shape,
@@ -1205,96 +1692,137 @@ class STEPProcessor:
                 zmax
             ) = bounding_box.Get()
 
-            properties["bounding_box"] = {
+            properties[
+                "bounding_box"
+            ] = {
                 "min": {
                     "x": xmin,
                     "y": ymin,
-                    "z": zmin,
+                    "z": zmin
                 },
+
                 "max": {
                     "x": xmax,
                     "y": ymax,
-                    "z": zmax,
+                    "z": zmax
                 },
+
                 "dimensions": {
-                    "length_x": xmax - xmin,
-                    "length_y": ymax - ymin,
-                    "length_z": zmax - zmin,
+                    "length_x":
+                        xmax - xmin,
+
+                    "length_y":
+                        ymax - ymin,
+
+                    "length_z":
+                        zmax - zmin
                 },
-                "unit": "mm",
+
+                "unit":
+                    "mm"
             }
 
         except Exception as exc:
 
             logger.warning(
-                "Could not calculate bounding box: %s",
+                "Could not calculate "
+                "bounding box: %s",
                 exc
             )
 
-            properties["bounding_box"] = None
+            properties[
+                "bounding_box"
+            ] = None
 
         return properties
+
+    # ==========================================================
+    # TOPOLOGY
+    # ==========================================================
 
     def _extract_topology_info(
         self,
         shape: TopoDS_Shape
     ) -> Dict[str, Any]:
 
-        explorer = TopologyExplorer(
-            shape
+        explorer = (
+            TopologyExplorer(
+                shape
+            )
         )
 
         return {
-            "solids": explorer.number_of_solids(),
-            "compounds": explorer.number_of_compounds(),
-            "shells": explorer.number_of_shells(),
-            "faces": explorer.number_of_faces(),
-            "edges": explorer.number_of_edges(),
-            "vertices": explorer.number_of_vertices(),
+            "solids":
+                explorer.number_of_solids(),
+
+            "compounds":
+                explorer.number_of_compounds(),
+
+            "shells":
+                explorer.number_of_shells(),
+
+            "faces":
+                explorer.number_of_faces(),
+
+            "edges":
+                explorer.number_of_edges(),
+
+            "vertices":
+                explorer.number_of_vertices(),
+
             "details": {
-                "has_free_edges": (
-                    len(
-                        list(
-                            explorer.edges()
-                        )
+                "shape_type":
+                    int(
+                        shape.ShapeType()
                     )
-                    != explorer.number_of_edges()
-                ),
-                "shape_type": int(
-                    shape.ShapeType()
-                ),
-            },
+            }
         }
+
+    # ==========================================================
+    # VALIDATION
+    # ==========================================================
 
     def _validate_shape(
         self,
         shape: TopoDS_Shape
     ) -> Dict[str, Any]:
 
-        validation: Dict[
-            str,
-            Any
-        ] = {
-            "is_valid": False,
-            "is_done": False,
-            "issues": [],
+        validation = {
+            "is_valid":
+                False,
+
+            "is_done":
+                False,
+
+            "issues":
+                []
         }
 
         try:
 
-            analyzer = BRepCheck_Analyzer(
-                shape
+            analyzer = (
+                BRepCheck_Analyzer(
+                    shape
+                )
             )
 
-            validation["is_valid"] = bool(
+            validation[
+                "is_valid"
+            ] = bool(
                 analyzer.IsValid()
             )
 
-            validation["is_done"] = True
+            validation[
+                "is_done"
+            ] = True
 
-            if not validation["is_valid"]:
+            if not validation[
+                "is_valid"
+            ]:
 
-                validation["issues"].append(
+                validation[
+                    "issues"
+                ].append(
                     "Shape contains geometric "
                     "or topological errors"
                 )
@@ -1306,7 +1834,9 @@ class STEPProcessor:
                 exc
             )
 
-            validation["issues"].append(
+            validation[
+                "issues"
+            ].append(
                 "Validation failed: {}".format(
                     exc
                 )
@@ -1314,30 +1844,41 @@ class STEPProcessor:
 
         try:
 
-            explorer = TopologyExplorer(
-                shape
+            topology = (
+                TopologyExplorer(
+                    shape
+                )
             )
 
             degenerate_count = 0
 
-            for edge in explorer.edges():
+            for edge in topology.edges():
 
                 if BRep_Tool.Degenerated(
                     edge
                 ):
+
                     degenerate_count += 1
 
             if degenerate_count > 0:
 
-                validation["issues"].append(
-                    "Found {} degenerate edges".format(
+                validation[
+                    "issues"
+                ].append(
+                    "Found {} degenerate "
+                    "edges".format(
                         degenerate_count
                     )
                 )
 
-            validation["quality_metrics"] = {
-                "degenerate_edges": degenerate_count,
-                "total_edges": explorer.number_of_edges(),
+            validation[
+                "quality_metrics"
+            ] = {
+                "degenerate_edges":
+                    degenerate_count,
+
+                "total_edges":
+                    topology.number_of_edges()
             }
 
         except Exception as exc:
