@@ -346,13 +346,37 @@ def render_step_view(
     renderer.SetActiveCamera(camera)
     renderer.ResetCameraClippingRange()
 
-    render_window = vtk.vtkRenderWindow()
+    logger.info(
+        "RENDER CHECKPOINT 14A: creating explicit OSMesa render window"
+    )
+
+    try:
+        from vtkmodules.vtkRenderingOpenGL2 import vtkOSOpenGLRenderWindow
+
+        render_window = vtkOSOpenGLRenderWindow()
+
+        logger.info(
+            "RENDER CHECKPOINT 14B: vtkOSOpenGLRenderWindow created"
+        )
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"OSMesa render window is not available: {exc}"
+        )
+
     render_window.SetOffScreenRendering(1)
     render_window.SetSize(width, height)
     render_window.AddRenderer(renderer)
-    logger.info("RENDER CHECKPOINT 14: starting offscreen VTK render")
+
+    logger.info(
+        "RENDER CHECKPOINT 14C: starting explicit OSMesa render"
+    )
 
     render_window.Render()
+
+    logger.info(
+        "RENDER CHECKPOINT 15: explicit OSMesa render completed"
+    )
 
     logger.info("RENDER CHECKPOINT 15: offscreen VTK render completed")
 
