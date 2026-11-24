@@ -1,15 +1,17 @@
 """
-Memory-efficient CPU CAD renderer with B-Rep edge overlay.
+Memory-efficient CPU CAD renderer with Open CASCADE hidden-line removal.
 
 Geometry comes exclusively from the real Open CASCADE B-Rep.
 No OpenGL, VTK, OSMesa or GPU rendering is used.
 
 Open CASCADE:
     STEP -> TopoDS_Shape -> BRepMesh triangulation
+    STEP -> HLRBRep_Algo -> visible and hidden projected edges
 
 CPU renderer:
     faces -> compact NumPy arrays -> orthographic SVG fills
-    edges -> BRepAdaptor_Curve -> orthographic SVG black lines
+    visible edges -> exact Open CASCADE HLR -> SVG lines
+    hidden edges -> omitted by default, optional dashed lines
 
 B-Rep face IDs remain consistent with /analyze/faces.
 """
@@ -25,12 +27,15 @@ from OCC.Core.BRep import BRep_Tool
 from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
 from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
 from OCC.Core.GeomAbs import GeomAbs_Line
+from OCC.Core.HLRAlgo import HLRAlgo_Projector
+from OCC.Core.HLRBRep import HLRBRep_Algo, HLRBRep_HLRToShape
 from OCC.Core.IFSelect import IFSelect_RetDone
 from OCC.Core.STEPControl import STEPControl_Reader
 from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
 from OCC.Core.TopExp import TopExp_Explorer
 from OCC.Core.TopLoc import TopLoc_Location
 from OCC.Core.TopoDS import topods
+from OCC.Core.gp import gp_Ax2, gp_Dir, gp_Pnt
 
 
 logger = logging.getLogger(__name__)
@@ -203,7 +208,6 @@ def _count_triangles(shape) -> int:
         )
 
         if triangulation is not None:
-
             total += (
                 triangulation.NbTriangles()
             )
@@ -213,21 +217,120 @@ def _count_triangles(shape) -> int:
     return total
 
 
-def _extract_projected_edges(
-    shape,
-    right,
-    up,
-    curve_samples: int = 48
+def _sample_hlr_edge(
+    edge,
+    curve_samples: int = 64
+):
+
+    if BRep_Tool.Degenerated(
+        edge
+    ):
+        return None
+
+    adaptor = BRepAdaptor_Curve(
+        edge
+    )
+
+    first_parameter = (
+        adaptor.FirstParameter()
+    )
+
+    last_parameter = (
+        adaptor.LastParameter()
+    )
+
+    if (
+        not math.isfinite(
+            first_parameter
+        )
+        or not math.isfinite(
+            last_parameter
+        )
+    ):
+        return None
+
+    if abs(
+        last_parameter
+        - first_parameter
+    ) < 1.0e-14:
+        return None
+
+    if adaptor.GetType() == GeomAbs_Line:
+        sample_count = 2
+    else:
+        sample_count = curve_samples
+
+    parameters = np.linspace(
+        first_parameter,
+        last_parameter,
+        sample_count,
+        dtype=np.float64
+    )
+
+    projected_points = []
+
+    for parameter in parameters:
+
+        point = adaptor.Value(
+            float(parameter)
+        )
+
+        candidate = (
+            point.X(),
+            point.Y()
+        )
+
+        if not projected_points:
+
+            projected_points.append(
+                candidate
+            )
+
+            continue
+
+        previous_point = (
+            projected_points[-1]
+        )
+
+        if (
+            abs(
+                candidate[0]
+                - previous_point[0]
+            ) > 1.0e-10
+            or
+            abs(
+                candidate[1]
+                - previous_point[1]
+            ) > 1.0e-10
+        ):
+            projected_points.append(
+                candidate
+            )
+
+    if len(
+        projected_points
+    ) < 2:
+        return None
+
+    return projected_points
+
+
+def _extract_edges_from_hlr_shape(
+    hlr_shape
 ):
 
     projected_edges = []
 
+    if (
+        hlr_shape is None
+        or hlr_shape.IsNull()
+    ):
+        return projected_edges
+
     explorer = TopExp_Explorer(
-        shape,
+        hlr_shape,
         TopAbs_EDGE
     )
-
-    seen_edges = set()
 
     while explorer.More():
 
@@ -236,137 +339,23 @@ def _extract_projected_edges(
         )
 
         try:
-            edge_key = edge.HashCode(
-                2147483647
+
+            projected_points = (
+                _sample_hlr_edge(
+                    edge
+                )
             )
 
-        except Exception:
-            edge_key = None
-
-        if (
-            edge_key is not None
-            and edge_key in seen_edges
-        ):
-            explorer.Next()
-            continue
-
-        if edge_key is not None:
-            seen_edges.add(
-                edge_key
-            )
-
-        if BRep_Tool.Degenerated(
-            edge
-        ):
-            explorer.Next()
-            continue
-
-        try:
-
-            adaptor = BRepAdaptor_Curve(
-                edge
-            )
-
-            first_parameter = (
-                adaptor.FirstParameter()
-            )
-
-            last_parameter = (
-                adaptor.LastParameter()
-            )
-
-            if (
-                not math.isfinite(
-                    first_parameter
-                )
-                or not math.isfinite(
-                    last_parameter
-                )
-            ):
-                explorer.Next()
-                continue
-
-            if abs(
-                last_parameter
-                - first_parameter
-            ) < 1.0e-14:
-                explorer.Next()
-                continue
-
-            if adaptor.GetType() == GeomAbs_Line:
-                sample_count = 2
-            else:
-                sample_count = curve_samples
-
-            parameters = np.linspace(
-                first_parameter,
-                last_parameter,
-                sample_count,
-                dtype=np.float64
-            )
-
-            projected_points = []
-
-            for parameter in parameters:
-
-                point = adaptor.Value(
-                    float(parameter)
-                )
-
-                point_3d = (
-                    point.X(),
-                    point.Y(),
-                    point.Z()
-                )
-
-                projected_points.append(
-                    (
-                        _dot(
-                            point_3d,
-                            right
-                        ),
-                        _dot(
-                            point_3d,
-                            up
-                        )
-                    )
-                )
-
-            cleaned_points = [
-                projected_points[0]
-            ]
-
-            for point in projected_points[1:]:
-
-                previous_point = (
-                    cleaned_points[-1]
-                )
-
-                if (
-                    abs(
-                        point[0]
-                        - previous_point[0]
-                    ) > 1.0e-10
-                    or
-                    abs(
-                        point[1]
-                        - previous_point[1]
-                    ) > 1.0e-10
-                ):
-                    cleaned_points.append(
-                        point
-                    )
-
-            if len(cleaned_points) >= 2:
+            if projected_points:
 
                 projected_edges.append(
-                    cleaned_points
+                    projected_points
                 )
 
         except Exception as exc:
 
             logger.warning(
-                "Could not project one B-Rep edge: {}".format(
+                "Could not sample one HLR edge: {}".format(
                     exc
                 )
             )
@@ -374,6 +363,108 @@ def _extract_projected_edges(
         explorer.Next()
 
     return projected_edges
+
+
+def _extract_hlr_edge_sets(
+    shape,
+    view,
+    right,
+    show_hidden_edges: bool
+):
+
+    logger.info(
+        "CPU RENDER 9: running exact Open CASCADE HLR"
+    )
+
+    # view_direction points from camera toward the model.
+    # The HLR projection-axis normal points toward the camera.
+
+    eye_direction = (
+        -view[0],
+        -view[1],
+        -view[2]
+    )
+
+    projection_axis = gp_Ax2(
+        gp_Pnt(
+            0.0,
+            0.0,
+            0.0
+        ),
+        gp_Dir(
+            eye_direction[0],
+            eye_direction[1],
+            eye_direction[2]
+        ),
+        gp_Dir(
+            right[0],
+            right[1],
+            right[2]
+        )
+    )
+
+    algorithm = HLRBRep_Algo()
+
+    algorithm.Add(
+        shape
+    )
+
+    projector = HLRAlgo_Projector(
+        projection_axis
+    )
+
+    algorithm.Projector(
+        projector
+    )
+
+    algorithm.Update()
+
+    algorithm.Hide()
+
+    hlr_result = HLRBRep_HLRToShape(
+        algorithm
+    )
+
+    visible_shape = (
+        hlr_result.VCompound()
+    )
+
+    visible_edges = (
+        _extract_edges_from_hlr_shape(
+            visible_shape
+        )
+    )
+
+    hidden_edges = []
+
+    if show_hidden_edges:
+
+        hidden_shape = (
+            hlr_result.HCompound()
+        )
+
+        hidden_edges = (
+            _extract_edges_from_hlr_shape(
+                hidden_shape
+            )
+        )
+
+    logger.info(
+        "CPU RENDER 10: HLR extracted "
+        "{} visible and {} hidden edges".format(
+            len(
+                visible_edges
+            ),
+            len(
+                hidden_edges
+            )
+        )
+    )
+
+    return (
+        visible_edges,
+        hidden_edges
+    )
 
 
 def render_step_svg(
@@ -389,8 +480,14 @@ def render_step_svg(
     width: int = 1600,
     height: int = 1000,
     linear_deflection: float = 1.0,
-    angular_deflection: float = 0.35
+    angular_deflection: float = 0.35,
+    show_hidden_edges: bool = False,
+    hidden_edge_color: str = "#808080"
 ) -> str:
+
+    # ---------------------------------------------------------
+    # INPUT VALIDATION
+    # ---------------------------------------------------------
 
     if not os.path.exists(
         file_path
@@ -429,10 +526,19 @@ def render_step_svg(
         "edge_color"
     )
 
+    hidden_edge_color = _validate_color(
+        hidden_edge_color,
+        "hidden_edge_color"
+    )
+
     background_color = _validate_color(
         background_color,
         "background_color"
     )
+
+    # ---------------------------------------------------------
+    # CAMERA BASIS
+    # ---------------------------------------------------------
 
     view = _normalize(
         view_direction
@@ -447,12 +553,14 @@ def render_step_svg(
         requested_up
     )
 
-    if math.sqrt(
+    right_length = math.sqrt(
         _dot(
             right_raw,
             right_raw
         )
-    ) < 1.0e-12:
+    )
+
+    if right_length < 1.0e-12:
         raise ValueError(
             "view_direction and up_direction cannot be parallel"
         )
@@ -472,6 +580,10 @@ def render_step_svg(
         )
     )
 
+    # ---------------------------------------------------------
+    # FACE SELECTION
+    # ---------------------------------------------------------
+
     highlight_set = {
         str(face_id).strip().upper()
         for face_id in (
@@ -480,11 +592,19 @@ def render_step_svg(
         if str(face_id).strip()
     }
 
+    # ---------------------------------------------------------
+    # READ AND MESH STEP
+    # ---------------------------------------------------------
+
     shape = _read_and_mesh_step(
         file_path,
         linear_deflection,
         angular_deflection
     )
+
+    # ---------------------------------------------------------
+    # COUNT TRIANGLES
+    # ---------------------------------------------------------
 
     logger.info(
         "CPU RENDER 5: counting B-Rep triangles"
@@ -505,6 +625,10 @@ def render_step_svg(
             triangle_count
         )
     )
+
+    # ---------------------------------------------------------
+    # COMPACT TRIANGLE ARRAYS
+    # ---------------------------------------------------------
 
     points = np.empty(
         (
@@ -540,6 +664,10 @@ def render_step_svg(
     projected_y_max = float(
         "-inf"
     )
+
+    # ---------------------------------------------------------
+    # PROJECT FACE TRIANGLES
+    # ---------------------------------------------------------
 
     explorer = TopExp_Explorer(
         shape,
@@ -733,25 +861,22 @@ def render_step_svg(
         )
     )
 
-    logger.info(
-        "CPU RENDER 9: extracting projected B-Rep edges"
-    )
+    # ---------------------------------------------------------
+    # EXACT HIDDEN-LINE REMOVAL
+    # ---------------------------------------------------------
 
-    projected_edges = (
-        _extract_projected_edges(
+    visible_edges, hidden_edges = (
+        _extract_hlr_edge_sets(
             shape,
+            view,
             right,
-            up
+            show_hidden_edges
         )
     )
 
-    logger.info(
-        "CPU RENDER 10: extracted {} B-Rep edges".format(
-            len(
-                projected_edges
-            )
-        )
-    )
+    # ---------------------------------------------------------
+    # PROJECTED EXTENTS
+    # ---------------------------------------------------------
 
     projected_width = (
         projected_x_max
@@ -786,10 +911,8 @@ def render_step_svg(
     )
 
     scale = min(
-        usable_width
-        / projected_width,
-        usable_height
-        / projected_height
+        usable_width / projected_width,
+        usable_height / projected_height
     )
 
     rendered_width = (
@@ -811,6 +934,10 @@ def render_step_svg(
         float(height)
         - rendered_height
     ) / 2.0
+
+    # ---------------------------------------------------------
+    # CONVERT FACE POINTS TO IMAGE COORDINATES
+    # ---------------------------------------------------------
 
     points[:, :, 0] = (
         x_offset
@@ -838,6 +965,38 @@ def render_step_svg(
     draw_order = np.argsort(
         depths
     )[::-1]
+
+    def hlr_to_image(
+        projected_point
+    ):
+
+        image_x = (
+            x_offset
+            + (
+                projected_point[0]
+                - projected_x_min
+            ) * scale
+        )
+
+        image_y = (
+            float(height)
+            - (
+                y_offset
+                + (
+                    projected_point[1]
+                    - projected_y_min
+                ) * scale
+            )
+        )
+
+        return (
+            image_x,
+            image_y
+        )
+
+    # ---------------------------------------------------------
+    # WRITE SVG
+    # ---------------------------------------------------------
 
     logger.info(
         "CPU RENDER 12: writing SVG"
@@ -879,6 +1038,10 @@ def render_step_svg(
                 background_color
             )
         )
+
+        # -----------------------------------------------------
+        # FILLED FACE TRIANGLES
+        # -----------------------------------------------------
 
         face_buffer = []
         buffer_limit = 2000
@@ -951,6 +1114,67 @@ def render_step_svg(
                 )
             )
 
+        # -----------------------------------------------------
+        # OPTIONAL HIDDEN EDGES
+        # -----------------------------------------------------
+
+        if (
+            show_hidden_edges
+            and hidden_edges
+        ):
+
+            svg.write(
+                '<g '
+                'fill="none" '
+                'stroke="{}" '
+                'stroke-width="1.0" '
+                'stroke-dasharray="6,6" '
+                'stroke-linecap="round" '
+                'stroke-linejoin="round">\n'.format(
+                    hidden_edge_color
+                )
+            )
+
+            for edge_points in hidden_edges:
+
+                svg_points = []
+
+                for point in edge_points:
+
+                    image_x, image_y = (
+                        hlr_to_image(
+                            point
+                        )
+                    )
+
+                    svg_points.append(
+                        "{:.3f},{:.3f}".format(
+                            image_x,
+                            image_y
+                        )
+                    )
+
+                if len(
+                    svg_points
+                ) >= 2:
+
+                    svg.write(
+                        '<polyline '
+                        'points="{}"/>\n'.format(
+                            " ".join(
+                                svg_points
+                            )
+                        )
+                    )
+
+            svg.write(
+                "</g>\n"
+            )
+
+        # -----------------------------------------------------
+        # VISIBLE EDGES ONLY
+        # -----------------------------------------------------
+
         svg.write(
             '<g '
             'fill="none" '
@@ -962,31 +1186,15 @@ def render_step_svg(
             )
         )
 
-        for projected_edge in projected_edges:
+        for edge_points in visible_edges:
 
             svg_points = []
 
-            for (
-                projected_x,
-                projected_y
-            ) in projected_edge:
+            for point in edge_points:
 
-                image_x = (
-                    x_offset
-                    + (
-                        projected_x
-                        - projected_x_min
-                    ) * scale
-                )
-
-                image_y = (
-                    float(height)
-                    - (
-                        y_offset
-                        + (
-                            projected_y
-                            - projected_y_min
-                        ) * scale
+                image_x, image_y = (
+                    hlr_to_image(
+                        point
                     )
                 )
 
@@ -1017,6 +1225,10 @@ def render_step_svg(
         svg.write(
             "</svg>\n"
         )
+
+    # ---------------------------------------------------------
+    # VERIFY OUTPUT
+    # ---------------------------------------------------------
 
     if not os.path.exists(
         output_path
