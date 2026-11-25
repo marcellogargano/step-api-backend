@@ -19,11 +19,11 @@ B-Rep face IDs remain consistent with /analyze/faces.
 import logging
 import math
 import os
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from OCC.Core.BRep import BRep_Tool
+from OCC.Core.BRep import BRep_Builder, BRep_Tool
 from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
 from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
 from OCC.Core.GeomAbs import GeomAbs_Line
@@ -31,10 +31,10 @@ from OCC.Core.HLRAlgo import HLRAlgo_Projector
 from OCC.Core.HLRBRep import HLRBRep_Algo, HLRBRep_HLRToShape
 from OCC.Core.IFSelect import IFSelect_RetDone
 from OCC.Core.STEPControl import STEPControl_Reader
-from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
+from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED, TopAbs_SOLID
 from OCC.Core.TopExp import TopExp_Explorer
 from OCC.Core.TopLoc import TopLoc_Location
-from OCC.Core.TopoDS import topods
+from OCC.Core.TopoDS import TopoDS_Compound, topods
 from OCC.Core.gp import gp_Ax2, gp_Dir, gp_Pnt
 
 
@@ -403,10 +403,26 @@ def _extract_hlr_edge_sets(
         )
     )
 
+    # HLR must receive only real solid geometry. Free datum axes, datum planes,
+    # construction wires and isolated edges are intentionally excluded here.
+    # Named references are rendered separately only when explicitly requested.
+    solid_compound = TopoDS_Compound()
+    solid_builder = BRep_Builder()
+    solid_builder.MakeCompound(solid_compound)
+    solid_explorer = TopExp_Explorer(shape, TopAbs_SOLID)
+    solid_count = 0
+
+    while solid_explorer.More():
+        solid_builder.Add(solid_compound, solid_explorer.Current())
+        solid_count += 1
+        solid_explorer.Next()
+
+    hlr_shape = solid_compound if solid_count > 0 else shape
+
     algorithm = HLRBRep_Algo()
 
     algorithm.Add(
-        shape
+        hlr_shape
     )
 
     projector = HLRAlgo_Projector(
@@ -425,29 +441,18 @@ def _extract_hlr_edge_sets(
         algorithm
     )
 
-    visible_shape = (
-        hlr_result.VCompound()
-    )
-
-    visible_edges = (
-        _extract_edges_from_hlr_shape(
-            visible_shape
-        )
-    )
+    # A complete engineering view is the union of real visible sharp edges
+    # and view-dependent apparent contours (silhouettes). OutLineVCompound
+    # supplies cylinder/sphere/torus contours that are not real B-Rep edges.
+    visible_edges = []
+    visible_edges.extend(_extract_edges_from_hlr_shape(hlr_result.VCompound()))
+    visible_edges.extend(_extract_edges_from_hlr_shape(hlr_result.OutLineVCompound()))
 
     hidden_edges = []
 
     if show_hidden_edges:
-
-        hidden_shape = (
-            hlr_result.HCompound()
-        )
-
-        hidden_edges = (
-            _extract_edges_from_hlr_shape(
-                hidden_shape
-            )
-        )
+        hidden_edges.extend(_extract_edges_from_hlr_shape(hlr_result.HCompound()))
+        hidden_edges.extend(_extract_edges_from_hlr_shape(hlr_result.OutLineHCompound()))
 
     logger.info(
         "CPU RENDER 10: HLR extracted "
@@ -482,7 +487,11 @@ def render_step_svg(
     linear_deflection: float = 1.0,
     angular_deflection: float = 0.35,
     show_hidden_edges: bool = False,
-    hidden_edge_color: str = "#808080"
+    hidden_edge_color: str = "#808080",
+    show_references: bool = False,
+    reference_names: Optional[List[str]] = None,
+    reference_entities: Optional[List[Dict[str, Any]]] = None,
+    reference_color: str = "#606060"
 ) -> str:
 
     # ---------------------------------------------------------
@@ -529,6 +538,11 @@ def render_step_svg(
     hidden_edge_color = _validate_color(
         hidden_edge_color,
         "hidden_edge_color"
+    )
+
+    reference_color = _validate_color(
+        reference_color,
+        "reference_color"
     )
 
     background_color = _validate_color(
@@ -1221,6 +1235,57 @@ def render_step_svg(
         svg.write(
             "</g>\n"
         )
+
+        # Named datum/reference geometry is a separate graphic layer. It is
+        # never included by show_hidden_edges and appears only when explicitly
+        # requested by name.
+        if show_references and reference_entities:
+            requested = {name.strip().upper() for name in (reference_names or []) if name.strip()}
+            selected = [
+                item for item in reference_entities
+                if item.get("name", "").strip().upper() in requested
+            ]
+            reference_length = 0.15 * max(projected_width, projected_height)
+            svg.write(
+                '<g fill="none" stroke="{}" stroke-width="1.2" '
+                'stroke-dasharray="7,5" stroke-linecap="round">\n'.format(reference_color)
+            )
+
+            def project_reference_point(point_3d):
+                projected_x = _dot(point_3d, right)
+                projected_y = _dot(point_3d, up)
+                return (
+                    x_offset + (projected_x - projected_x_min) * scale,
+                    float(height) - (y_offset + (projected_y - projected_y_min) * scale),
+                )
+
+            for item in selected:
+                origin_data = item.get("origin") or {}
+                if not all(key in origin_data for key in ("x", "y", "z")):
+                    continue
+                origin_3d = (origin_data["x"], origin_data["y"], origin_data["z"])
+                ox, oy = project_reference_point(origin_3d)
+                vectors = []
+                if item.get("type") in ("COORDINATE_SYSTEM", "AXIS"):
+                    for key in ("x_axis", "y_axis", "z_axis"):
+                        vector = item.get(key)
+                        if vector and all(axis in vector for axis in ("x", "y", "z")):
+                            vectors.append((vector["x"], vector["y"], vector["z"]))
+                if vectors:
+                    for vector in vectors:
+                        endpoint = (
+                            origin_3d[0] + vector[0] * reference_length,
+                            origin_3d[1] + vector[1] * reference_length,
+                            origin_3d[2] + vector[2] * reference_length,
+                        )
+                        ex, ey = project_reference_point(endpoint)
+                        svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(ox, oy, ex, ey))
+                else:
+                    svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(ox - 6, oy, ox + 6, oy))
+                    svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(ox, oy - 6, ox, oy + 6))
+                svg.write('<text x="{:.3f}" y="{:.3f}" fill="{}" stroke="none" font-size="14">{}</text>\n'.format(ox + 8, oy - 8, reference_color, item.get("name", "")))
+
+            svg.write("</g>\n")
 
         svg.write(
             "</svg>\n"

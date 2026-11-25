@@ -29,7 +29,7 @@ app = FastAPI(
         "XCAF assembly analysis, face identification "
         "and orthographic CAD projection"
     ),
-    version="2.0.0",
+    version="3.0.0",
 )
 
 
@@ -118,7 +118,7 @@ async def root():
     return {
         "status": "healthy",
         "service": "STEP File Analysis API",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "rendering": (
             "Open CASCADE B-Rep "
             "CPU projection with HLR"
@@ -568,6 +568,10 @@ async def render_step_cpu(
 
     hidden_edge_color: str = Form("#808080"),
 
+    show_references: bool = Form(False),
+    reference_names: str = Form(""),
+    reference_color: str = Form("#606060"),
+
     width: int = Form(1600),
     height: int = Form(1000),
 
@@ -647,12 +651,27 @@ async def render_step_cpu(
             highlight_faces
         )
 
+        requested_reference_names = [
+            value.strip()
+            for value in reference_names.split(",")
+            if value.strip()
+        ]
+        reference_entities = []
+        if show_references and requested_reference_names:
+            reference_result = xcaf_processor.analyze_references(step_path)
+            requested_upper = {value.upper() for value in requested_reference_names}
+            reference_entities = [
+                item for item in reference_result.get("references", [])
+                if item.get("name", "").upper() in requested_upper
+            ]
+
         logger.info(
             "CPU rendering STEP B-Rep: "
             "%s (%s bytes), "
             "view=[%s, %s, %s], "
             "highlighted_faces=%s, "
-            "show_hidden_edges=%s",
+            "show_hidden_edges=%s, "
+            "references=%s",
             file.filename,
             len(content),
             view_x,
@@ -660,6 +679,7 @@ async def render_step_cpu(
             view_z,
             len(selected_faces),
             show_hidden_edges,
+            requested_reference_names,
         )
 
         render_step_svg(
@@ -715,6 +735,22 @@ async def render_step_cpu(
 
             hidden_edge_color=(
                 hidden_edge_color
+            ),
+
+            show_references=(
+                show_references
+            ),
+
+            reference_names=(
+                requested_reference_names
+            ),
+
+            reference_entities=(
+                reference_entities
+            ),
+
+            reference_color=(
+                reference_color
             ),
         )
 
