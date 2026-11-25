@@ -29,7 +29,7 @@ app = FastAPI(
         "XCAF assembly analysis, face identification "
         "and orthographic CAD projection"
     ),
-    version="1.4.0",
+    version="2.0.0",
 )
 
 
@@ -118,7 +118,7 @@ async def root():
     return {
         "status": "healthy",
         "service": "STEP File Analysis API",
-        "version": "1.4.0",
+        "version": "2.0.0",
         "rendering": (
             "Open CASCADE B-Rep "
             "CPU projection with HLR"

@@ -1,9 +1,12 @@
 """XCAF assembly and STEP reference processor for pythonocc-core 7.7.2."""
 
+import json
 import logging
 import math
 import os
 import re
+import subprocess
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -36,6 +39,85 @@ class XCAFProcessor:
         return self.xcaf_available
 
     def analyze_assembly(self, file_path: str) -> Dict[str, Any]:
+        """Run native XCAF in a child process; fall back without killing FastAPI."""
+        self._require_file(file_path)
+        command = [sys.executable, os.path.abspath(__file__), "--worker", file_path]
+        try:
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            fallback = self._analyze_step_product_structure(file_path)
+            fallback["native_xcaf"] = {"status": "timeout", "stderr": (exc.stderr or "")[-2000:]}
+            return fallback
+
+        if completed.returncode == 0:
+            try:
+                payload = json.loads(completed.stdout)
+                payload["worker_isolated"] = True
+                payload["native_xcaf"] = {"status": "success"}
+                return payload
+            except json.JSONDecodeError:
+                pass
+
+        fallback = self._analyze_step_product_structure(file_path)
+        fallback["worker_isolated"] = True
+        fallback["native_xcaf"] = {
+            "status": "native_crash_or_error",
+            "return_code": completed.returncode,
+            "stderr": completed.stderr[-4000:],
+            "stdout": completed.stdout[-2000:],
+        }
+        return fallback
+
+    def _analyze_step_product_structure(self, file_path: str) -> Dict[str, Any]:
+        """Read product/occurrence metadata when native XCAF is unavailable."""
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as stream:
+            entities = self._parse_step_entities(stream.read())
+        products = []
+        definitions = []
+        occurrences = []
+        for entity_id, expression in entities.items():
+            upper = expression.upper()
+            strings = re.findall(r"'([^']*)'", expression)
+            refs = [int(value) for value in re.findall(r"#(\d+)", expression)]
+            if upper.startswith("PRODUCT("):
+                products.append({
+                    "entity_id": "#{}".format(entity_id),
+                    "product_id": strings[0] if strings else "",
+                    "name": strings[1] if len(strings) > 1 and strings[1] else (strings[0] if strings else "PRODUCT_{}".format(entity_id)),
+                })
+            elif upper.startswith("PRODUCT_DEFINITION("):
+                definitions.append({"entity_id": "#{}".format(entity_id), "references": ["#{}".format(value) for value in refs]})
+            elif "NEXT_ASSEMBLY_USAGE_OCCURRENCE" in upper:
+                occurrences.append({
+                    "entity_id": "#{}".format(entity_id),
+                    "name": next((value for value in strings if value), "OCCURRENCE_{}".format(entity_id)),
+                    "parent_definition": "#{}".format(refs[-2]) if len(refs) >= 2 else None,
+                    "child_definition": "#{}".format(refs[-1]) if refs else None,
+                })
+        return {
+            "status": "fallback",
+            "backend_used": "step_product_structure_fallback",
+            "is_assembly": bool(occurrences),
+            "product_count": len(products),
+            "definition_count": len(definitions),
+            "occurrence_count": len(occurrences),
+            "products": products,
+            "definitions": definitions,
+            "occurrences": occurrences,
+            "limitations": [
+                "Native XCAF terminated in the current runtime.",
+                "Fallback does not resolve XCAF colors or instance transforms.",
+            ],
+        }
+
+    def _analyze_assembly_native(self, file_path: str) -> Dict[str, Any]:
         self._require_file(file_path)
         logger.info("XCAF 0: creating XCAF document")
 
@@ -253,3 +335,14 @@ class XCAFProcessor:
             raise FileNotFoundError("File not found: {}".format(file_path))
         if os.path.splitext(file_path)[1].lower() not in (".step", ".stp"):
             raise ValueError("Invalid STEP file extension")
+
+
+def _worker_main():
+    if len(sys.argv) != 3 or sys.argv[1] != "--worker":
+        raise SystemExit(2)
+    payload = XCAFProcessor()._analyze_assembly_native(sys.argv[2])
+    sys.stdout.write(json.dumps(payload, separators=(",", ":")))
+
+
+if __name__ == "__main__":
+    _worker_main()
