@@ -181,6 +181,7 @@ class XCAFProcessor:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as stream:
             text = stream.read()
         entities = self._parse_step_entities(text)
+        reverse_refs = self._build_reverse_references(entities)
         reference_map = {}
 
         # Named placements and points available independently of Creo layers.
@@ -234,6 +235,7 @@ class XCAFProcessor:
                     target_id,
                     entities,
                     datum_type,
+                    reverse_refs,
                 )
                 item = self._datum_from_entity(target_id, datum_name, datum_type, entities)
                 if not item:
@@ -245,8 +247,24 @@ class XCAFProcessor:
                 item["display_name"] = datum_name
                 reference_map[(item["id"], item["type"], layer_name)] = item
 
-        references = list(reference_map.values())
-        references.sort(key=lambda item: (item.get("owner", ""), item["type"], item["name"], item["id"]))
+        raw_references = list(reference_map.values())
+        consolidated = {}
+        for item in raw_references:
+            key = (item.get("id"), item.get("type"))
+            current = consolidated.get(key)
+            if current is None:
+                current = dict(item); current["layers"] = []
+                if item.get("layer"): current["layers"].append(item["layer"])
+                consolidated[key] = current; continue
+            if item.get("layer") and item["layer"] not in current["layers"]: current["layers"].append(item["layer"])
+            for alias in item.get("aliases", []):
+                current.setdefault("aliases", [])
+                if alias not in current["aliases"]: current["aliases"].append(alias)
+            candidate = item.get("display_name") or item.get("name") or ""; existing = current.get("display_name") or current.get("name") or ""
+            if candidate and not candidate.startswith("#") and existing.startswith("#"):
+                current["name"] = candidate; current["display_name"] = candidate
+        references = list(consolidated.values())
+        references.sort(key=lambda item: (item.get("owner", ""), item["type"], item.get("display_name", item.get("name", "")), item["id"]))
         counts = {}
         for item in references:
             counts[item["type"]] = counts.get(item["type"], 0) + 1
@@ -386,62 +404,61 @@ class XCAFProcessor:
             "note": "Occurrence colors are preserved as STEP presentation metadata. Native XCAF is still required for guaranteed occurrence-to-TopoDS mapping.",
         }
 
-    def _best_reference_name(self, seed_id, target_id, entities, datum_type):
-        """Resolve the Creo semantic datum name instead of a representation number."""
-        reachable = self._collect_reachable(seed_id, entities, 16)
-        reachable.add(target_id)
-
-        preferred_kinds = {
+    def _best_reference_name(self, seed_id, target_id, entities, datum_type, reverse_refs=None):
+        """Resolve Creo datum names by walking forward and inverse STEP references."""
+        reverse_refs = reverse_refs or self._build_reverse_references(entities)
+        neighbourhood = self._collect_bidirectional_neighborhood({seed_id, target_id}, entities, reverse_refs, 8)
+        preferred = {
             "DATUM_AXIS": {"TRIMMED_CURVE", "AXIS1_PLACEMENT", "GEOMETRIC_CURVE_SET"},
-            "DATUM_PLANE": {"PLANE", "AXIS2_PLACEMENT_3D"},
+            "DATUM_PLANE": {"PLANE", "AXIS2_PLACEMENT_3D", "GEOMETRIC_SET"},
             "DATUM_CSYS": {"AXIS2_PLACEMENT_3D"},
             "DATUM_POINT": {"CARTESIAN_POINT"},
         }.get(datum_type, set())
-
         candidates = []
-        for entity_id in reachable:
+        for entity_id in neighbourhood:
             expression = entities.get(entity_id, "")
             name = self._entity_name(expression)
             if not name:
                 continue
-            stripped = name.strip()
-            if not stripped:
+            name = name.strip()
+            if not name or re.fullmatch(r"[#0-9_.+\- ]+", name):
                 continue
-            upper = stripped.upper()
-            if re.fullmatch(r"[#0-9_.+\- ]+", stripped):
-                continue
-            if upper in {"", "NONE", "UNSPECIFIED", "DEFAULT"}:
-                continue
-            kind = self._entity_kind(expression)
-            score = 0
-            if kind in preferred_kinds:
-                score += 100
-            if re.fullmatch(r"A[_-]?\d+", upper):
-                score += 500
-            if upper.startswith("ASM_"):
-                score += 450
-            if upper.startswith("PRT_"):
-                score += 450
-            if upper.startswith("DTM"):
-                score += 400
-            if "CENTER" in upper:
-                score += 350
-            if kind == "TRIMMED_CURVE":
-                score += 80
-            candidates.append((score, stripped, entity_id))
-
+            upper = name.upper(); kind = self._entity_kind(expression); score = 0
+            if kind in preferred: score += 120
+            if re.fullmatch(r"A[_-]?\d+", upper): score += 800
+            if upper.startswith("ASM_"): score += 700
+            if upper.startswith("PRT_"): score += 700
+            if upper.startswith("DTM"): score += 650
+            if "CSYS" in upper: score += 600
+            if "CENTER" in upper or "CENTRE" in upper: score += 350
+            if kind == "TRIMMED_CURVE": score += 150
+            candidates.append((score, name, entity_id))
         candidates.sort(key=lambda item: (-item[0], item[2]))
         aliases = []
-        for _, candidate, _ in candidates:
-            if candidate not in aliases:
-                aliases.append(candidate)
-        for technical in ("#{}".format(seed_id), str(seed_id), "#{}".format(target_id), str(target_id)):
-            if technical not in aliases:
-                aliases.append(technical)
+        for _, value, _ in candidates:
+            if value not in aliases: aliases.append(value)
+        for value in ("#{}".format(seed_id), str(seed_id), "#{}".format(target_id), str(target_id)):
+            if value not in aliases: aliases.append(value)
+        return (candidates[0][1], aliases) if candidates else ("#{}".format(target_id), aliases)
 
-        if candidates:
-            return candidates[0][1], aliases
-        return "#{}".format(target_id), aliases
+    @staticmethod
+    def _build_reverse_references(entities):
+        reverse_refs = {}
+        for parent_id, expression in entities.items():
+            for child_id in XCAFProcessor._entity_refs(expression):
+                reverse_refs.setdefault(child_id, set()).add(parent_id)
+        return reverse_refs
+
+    def _collect_bidirectional_neighborhood(self, seeds, entities, reverse_refs, max_depth):
+        found = set(); frontier = [(seed, 0) for seed in seeds]
+        while frontier:
+            current, depth = frontier.pop(0)
+            if current in found or current not in entities or depth > max_depth: continue
+            found.add(current)
+            if depth == max_depth: continue
+            neighbours = set(self._entity_refs(entities[current])); neighbours.update(reverse_refs.get(current, set()))
+            frontier.extend((item, depth + 1) for item in neighbours if item not in found)
+        return found
 
     def _datum_from_entity(self, entity_id, name, datum_type, entities):
         if datum_type == "DATUM_CSYS":
