@@ -467,10 +467,10 @@ class XCAFProcessor:
             if value not in aliases: aliases.append(value)
         return (candidates[0][1],aliases) if candidates else ("#{}".format(target_id),aliases)
 
-    def _build_reverse_references(entities):
+    def _build_reverse_references(self, entities):
         reverse_refs = {}
         for parent_id, expression in entities.items():
-            for child_id in XCAFProcessor._entity_refs(expression):
+            for child_id in self._entity_refs(expression):
                 reverse_refs.setdefault(child_id, set()).add(parent_id)
         return reverse_refs
 
