@@ -405,60 +405,74 @@ class XCAFProcessor:
         }
 
     def _best_reference_name(self, seed_id, target_id, entities, datum_type, reverse_refs=None):
-        """Resolve Creo datum names by walking forward and inverse STEP references."""
-        reverse_refs = reverse_refs or self._build_reverse_references(entities)
-        neighbourhood = self._collect_bidirectional_neighborhood({seed_id, target_id}, entities, reverse_refs, 8)
-        preferred = {
-            "DATUM_AXIS": {"TRIMMED_CURVE", "AXIS1_PLACEMENT", "GEOMETRIC_CURVE_SET"},
-            "DATUM_PLANE": {"PLANE", "AXIS2_PLACEMENT_3D", "GEOMETRIC_SET"},
-            "DATUM_CSYS": {"AXIS2_PLACEMENT_3D"},
-            "DATUM_POINT": {"CARTESIAN_POINT"},
-        }.get(datum_type, set())
-        candidates = []
-        for entity_id in neighbourhood:
-            expression = entities.get(entity_id, "")
-            name = self._entity_name(expression)
-            if not name:
-                continue
-            name = name.strip()
-            if not name or re.fullmatch(r"[#0-9_.+\- ]+", name):
-                continue
-            upper = name.upper(); kind = self._entity_kind(expression); score = 0
-            if kind in preferred: score += 120
-            if re.fullmatch(r"A[_-]?\d+", upper): score += 800
-            if upper.startswith("ASM_"): score += 700
-            if upper.startswith("PRT_"): score += 700
-            if upper.startswith("DTM"): score += 650
-            if "CSYS" in upper: score += 600
-            if "CENTER" in upper or "CENTRE" in upper: score += 350
-            if kind == "TRIMMED_CURVE": score += 150
-            candidates.append((score, name, entity_id))
-        candidates.sort(key=lambda item: (-item[0], item[2]))
-        aliases = []
-        for _, value, _ in candidates:
-            if value not in aliases: aliases.append(value)
-        for value in ("#{}".format(seed_id), str(seed_id), "#{}".format(target_id), str(target_id)):
-            if value not in aliases: aliases.append(value)
-        return (candidates[0][1], aliases) if candidates else ("#{}".format(target_id), aliases)
+        """Resolve a datum name using only a narrow, typed reverse path.
 
-    @staticmethod
+        V9 deliberately refuses layer/style/property/product names. If a local
+        semantic datum name is not found, the STEP entity id remains the safe
+        fallback instead of inventing a wrong label.
+        """
+        reverse_refs = reverse_refs or self._build_reverse_references(entities)
+        allowed_kinds = {
+            "DATUM_AXIS": {
+                "LINE", "TRIMMED_CURVE", "COMPOSITE_CURVE", "GEOMETRIC_CURVE_SET",
+                "AXIS1_PLACEMENT", "REPRESENTATION_ITEM",
+            },
+            "DATUM_PLANE": {
+                "PLANE", "AXIS2_PLACEMENT_3D", "GEOMETRIC_SET", "REPRESENTATION_ITEM",
+            },
+            "DATUM_CSYS": {"AXIS2_PLACEMENT_3D", "REPRESENTATION_ITEM"},
+            "DATUM_POINT": {"CARTESIAN_POINT", "REPRESENTATION_ITEM"},
+        }.get(datum_type, set())
+        blocked_fragments = (
+            "LAYER", "STYLE", "COLOUR", "COLOR", "PRESENTATION", "PROPERTY",
+            "MEASURE", "PRODUCT", "SHAPE_REPRESENTATION", "ASSEMBLY_USAGE",
+            "CONTEXT_DEPENDENT", "REPRESENTATION_RELATIONSHIP",
+        )
+        frontier=[(target_id,0),(seed_id,0)]; seen=set(); candidates=[]
+        while frontier:
+            eid,depth=frontier.pop(0)
+            if eid in seen or eid not in entities or depth>3: continue
+            seen.add(eid); expr=entities[eid]; kind=self._entity_kind(expr)
+            if any(fragment in kind for fragment in blocked_fragments):
+                continue
+            name=self._entity_name(expr)
+            if name:
+                name=name.strip(); upper=name.upper()
+                is_layer_like = bool(re.search(r'(ALL_|DEF_|DTM_|AXES|FEATURES|COMPONENTS)', upper))
+                is_generic = upper in {"CONTINUOUS","DESIGN","AUTOMOTIVE DESIGN","SUPPLEMENTAL GEOMETRY","CENTROID","VOLUME","SURFACE AREA"}
+                if name and not re.fullmatch(r"[#0-9_.+\- ]+",name) and not is_layer_like and not is_generic:
+                    score=0
+                    if re.fullmatch(r"A[_-]?\d+",upper): score+=1000
+                    if upper.startswith("DTM"): score+=900
+                    if upper.startswith(("ASM_","PRT_")): score+=850
+                    if "CSYS" in upper: score+=800
+                    if kind=="TRIMMED_CURVE": score+=500
+                    if kind in allowed_kinds: score+=200
+                    score-=depth*25
+                    candidates.append((score,name,eid))
+            if depth<3:
+                for parent in reverse_refs.get(eid,set()):
+                    pkind=self._entity_kind(entities.get(parent,""))
+                    if pkind in allowed_kinds or pkind in {"TRIMMED_CURVE","COMPOSITE_CURVE","GEOMETRIC_CURVE_SET","GEOMETRIC_SET"}:
+                        frontier.append((parent,depth+1))
+                for child in self._entity_refs(expr):
+                    ckind=self._entity_kind(entities.get(child,""))
+                    if ckind in allowed_kinds:
+                        frontier.append((child,depth+1))
+        candidates.sort(key=lambda x:(-x[0],x[2]))
+        aliases=[]
+        for _,name,_ in candidates:
+            if name not in aliases: aliases.append(name)
+        for value in ("#{}".format(seed_id),str(seed_id),"#{}".format(target_id),str(target_id)):
+            if value not in aliases: aliases.append(value)
+        return (candidates[0][1],aliases) if candidates else ("#{}".format(target_id),aliases)
+
     def _build_reverse_references(entities):
         reverse_refs = {}
         for parent_id, expression in entities.items():
             for child_id in XCAFProcessor._entity_refs(expression):
                 reverse_refs.setdefault(child_id, set()).add(parent_id)
         return reverse_refs
-
-    def _collect_bidirectional_neighborhood(self, seeds, entities, reverse_refs, max_depth):
-        found = set(); frontier = [(seed, 0) for seed in seeds]
-        while frontier:
-            current, depth = frontier.pop(0)
-            if current in found or current not in entities or depth > max_depth: continue
-            found.add(current)
-            if depth == max_depth: continue
-            neighbours = set(self._entity_refs(entities[current])); neighbours.update(reverse_refs.get(current, set()))
-            frontier.extend((item, depth + 1) for item in neighbours if item not in found)
-        return found
 
     def _datum_from_entity(self, entity_id, name, datum_type, entities):
         if datum_type == "DATUM_CSYS":

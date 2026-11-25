@@ -1,4 +1,4 @@
-"""STEP File Analysis API V8."""
+"""STEP File Analysis API V9."""
 import json
 import logging
 import os
@@ -15,7 +15,7 @@ from xcaf_processor import XCAFProcessor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-app = FastAPI(title="STEP File Analysis API", version="8.0.0")
+app = FastAPI(title="STEP File Analysis API", version="9.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 processor = STEPProcessor()
 xcaf_processor = XCAFProcessor()
@@ -92,12 +92,12 @@ def select_references(items, selectors):
 
 @app.get("/")
 async def root():
-    return {"status": "healthy", "service": "STEP File Analysis API", "version": "8.0.0"}
+    return {"status": "healthy", "service": "STEP File Analysis API", "version": "9.0.0"}
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "occt_available": processor.is_available(), "xcaf_available": xcaf_processor.is_available(), "version": "8.0.0"}
+    return {"status": "healthy", "occt_available": processor.is_available(), "xcaf_available": xcaf_processor.is_available(), "version": "9.0.0"}
 
 
 async def save_upload(file):
