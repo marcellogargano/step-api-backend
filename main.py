@@ -29,7 +29,7 @@ app = FastAPI(
         "XCAF assembly analysis, face identification "
         "and orthographic CAD projection"
     ),
-    version="3.0.0",
+    version="4.0.0",
 )
 
 
@@ -118,7 +118,7 @@ async def root():
     return {
         "status": "healthy",
         "service": "STEP File Analysis API",
-        "version": "3.0.0",
+        "version": "4.0.0",
         "rendering": (
             "Open CASCADE B-Rep "
             "CPU projection with HLR"
@@ -150,6 +150,7 @@ async def health_check():
             "faces",
             "assembly",
             "references",
+            "colors",
             "section",
             "validation",
             "cpu_projection",
@@ -510,6 +511,28 @@ async def analyze_references(file: UploadFile = File(...)) -> Dict[str, Any]:
         safe_unlink(temp_file_path)
 
 
+@app.post("/analyze/colors")
+async def analyze_colors(file: UploadFile = File(...)) -> Dict[str, Any]:
+    file_ext = validate_step_filename(file.filename)
+    temp_file_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+            content = await file.read()
+            temp_file.write(content)
+            temp_file_path = temp_file.name
+        logger.info("Processing STEP colors: %s (%s bytes)", file.filename, len(content))
+        result = xcaf_processor.analyze_colors(temp_file_path)
+        result["original_filename"] = file.filename
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("STEP color analysis failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="STEP color analysis failed: {}".format(exc))
+    finally:
+        safe_unlink(temp_file_path)
+
+
 @app.post("/section-cpu")
 async def section_step_cpu(
     background_tasks: BackgroundTasks,
@@ -519,6 +542,7 @@ async def section_step_cpu(
     up_x: float = Form(0.0), up_y: float = Form(1.0), up_z: float = Form(0.0),
     fill_color: str = Form("#D9D9D9"), line_color: str = Form("#000000"),
     background_color: str = Form("#FFFFFF"), width: int = Form(1600), height: int = Form(1000),
+    section_reference: str = Form(""),
 ):
     file_ext = validate_step_filename(file.filename)
     step_path = None
@@ -528,8 +552,20 @@ async def section_step_cpu(
             content = await file.read(); temp_step.write(content); step_path = temp_step.name
         with tempfile.NamedTemporaryFile(delete=False, suffix=".svg") as temp_svg:
             svg_path = temp_svg.name
+        section_origin = [origin_x, origin_y, origin_z]
+        section_normal = [normal_x, normal_y, normal_z]
+        if section_reference.strip():
+            result = xcaf_processor.analyze_references(step_path)
+            target = next((item for item in result.get("references", []) if item.get("name", "").upper() == section_reference.strip().upper()), None)
+            if target is None:
+                raise ValueError("Section reference not found: {}".format(section_reference))
+            if target.get("type") != "DATUM_PLANE":
+                raise ValueError("section_reference must identify a DATUM_PLANE")
+            origin = target.get("origin", {}); normal = target.get("normal", {})
+            section_origin = [origin["x"], origin["y"], origin["z"]]
+            section_normal = [normal["x"], normal["y"], normal["z"]]
         render_step_section_svg(
-            step_path, svg_path, [origin_x, origin_y, origin_z], [normal_x, normal_y, normal_z],
+            step_path, svg_path, section_origin, section_normal,
             [up_x, up_y, up_z], width, height, line_color, fill_color, background_color,
         )
         background_tasks.add_task(safe_unlink, step_path)
@@ -571,6 +607,7 @@ async def render_step_cpu(
     show_references: bool = Form(False),
     reference_names: str = Form(""),
     reference_color: str = Form("#606060"),
+    reference_scale: float = Form(1.0),
 
     width: int = Form(1600),
     height: int = Form(1000),
@@ -659,11 +696,22 @@ async def render_step_cpu(
         reference_entities = []
         if show_references and requested_reference_names:
             reference_result = xcaf_processor.analyze_references(step_path)
-            requested_upper = {value.upper() for value in requested_reference_names}
-            reference_entities = [
-                item for item in reference_result.get("references", [])
-                if item.get("name", "").upper() in requested_upper
-            ]
+            available = reference_result.get("references", [])
+            selectors = {value.upper() for value in requested_reference_names}
+            if "ALL" in selectors:
+                reference_entities = available
+            else:
+                type_selectors = {
+                    "ALL_PLANES": "DATUM_PLANE",
+                    "ALL_AXES": "DATUM_AXIS",
+                    "ALL_CSYS": "DATUM_CSYS",
+                    "ALL_POINTS": "DATUM_POINT",
+                }
+                selected_types = {value for key, value in type_selectors.items() if key in selectors}
+                reference_entities = [
+                    item for item in available
+                    if item.get("name", "").upper() in selectors or item.get("type") in selected_types
+                ]
 
         logger.info(
             "CPU rendering STEP B-Rep: "
@@ -751,6 +799,10 @@ async def render_step_cpu(
 
             reference_color=(
                 reference_color
+            ),
+
+            reference_scale=(
+                reference_scale
             ),
         )
 

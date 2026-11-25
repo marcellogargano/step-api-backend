@@ -176,44 +176,248 @@ class XCAFProcessor:
         }
 
     def analyze_references(self, file_path: str) -> Dict[str, Any]:
-        """Extract named AXIS2_PLACEMENT_3D, AXIS1_PLACEMENT and CARTESIAN_POINT entities."""
+        """Extract Creo datum planes, axes, coordinate systems and points."""
         self._require_file(file_path)
-        text = open(file_path, "r", encoding="utf-8", errors="ignore").read()
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as stream:
+            text = stream.read()
         entities = self._parse_step_entities(text)
-        references = []
+        reference_map = {}
 
+        # Named placements and points available independently of Creo layers.
         for entity_id, expression in entities.items():
-            kind = expression.split("(", 1)[0].strip().upper()
-            if kind not in ("AXIS2_PLACEMENT_3D", "AXIS1_PLACEMENT", "CARTESIAN_POINT"):
-                continue
+            kind = self._entity_kind(expression)
             name = self._entity_name(expression)
             if not name:
                 continue
-
-            if kind == "CARTESIAN_POINT":
+            if kind == "AXIS2_PLACEMENT_3D":
+                item = self._placement_reference(entity_id, entities, name, "DATUM_CSYS")
+            elif kind == "AXIS1_PLACEMENT":
+                item = self._placement_reference(entity_id, entities, name, "DATUM_AXIS")
+            elif kind == "CARTESIAN_POINT":
                 point = self._cartesian_point(entity_id, entities)
-                if point is not None:
-                    references.append({"id": "#{}".format(entity_id), "name": name, "type": "POINT", "origin": point})
+                item = {"id": "#{}".format(entity_id), "name": name, "type": "DATUM_POINT", "origin": point} if point else None
+            else:
+                item = None
+            if item:
+                reference_map[(item["id"], item["type"])] = item
+
+        # Creo writes the semantic datum classification in presentation layers.
+        for layer_id, expression in entities.items():
+            if self._entity_kind(expression) != "PRESENTATION_LAYER_ASSIGNMENT":
+                continue
+            strings = re.findall(r"'([^']*)'", expression)
+            layer_name = strings[0] if strings else ""
+            upper_layer = layer_name.upper()
+            if "DTM_PLN" in upper_layer:
+                datum_type = "DATUM_PLANE"
+                target_kinds = {"PLANE"}
+            elif "DTM_CSYS" in upper_layer:
+                datum_type = "DATUM_CSYS"
+                target_kinds = {"AXIS2_PLACEMENT_3D"}
+            elif "AXES" in upper_layer or "DTM_AXIS" in upper_layer:
+                datum_type = "DATUM_AXIS"
+                target_kinds = {"AXIS1_PLACEMENT", "LINE", "TRIMMED_CURVE"}
+            elif "DTM_PNT" in upper_layer or "POINT" in upper_layer:
+                datum_type = "DATUM_POINT"
+                target_kinds = {"CARTESIAN_POINT"}
+            else:
                 continue
 
-            refs = [int(value) for value in re.findall(r"#(\d+)", expression)]
-            origin = self._cartesian_point(refs[0], entities) if refs else None
-            z_axis = self._direction(refs[1], entities) if len(refs) > 1 else (0.0, 0.0, 1.0)
-            x_axis = self._direction(refs[2], entities) if len(refs) > 2 else self._orthogonal_x(z_axis)
-            if origin is None or z_axis is None or x_axis is None:
+            owner = self._reference_owner(layer_name)
+            for seed_id in self._entity_refs(expression):
+                target_id = self._resolve_entity_of_kinds(seed_id, entities, target_kinds)
+                if target_id is None:
+                    continue
+                target_expression = entities[target_id]
+                datum_name = self._entity_name(target_expression) or self._entity_name(entities.get(seed_id, "")) or "#{}".format(target_id)
+                item = self._datum_from_entity(target_id, datum_name, datum_type, entities)
+                if not item:
+                    continue
+                item["layer"] = layer_name
+                item["owner"] = owner
+                item["source_entity"] = "#{}".format(seed_id)
+                reference_map[(item["id"], item["type"], layer_name)] = item
+
+        references = list(reference_map.values())
+        references.sort(key=lambda item: (item.get("owner", ""), item["type"], item["name"], item["id"]))
+        counts = {}
+        for item in references:
+            counts[item["type"]] = counts.get(item["type"], 0) + 1
+        return {"reference_count": len(references), "counts_by_type": counts, "references": references}
+
+    def analyze_colors(self, file_path: str) -> Dict[str, Any]:
+        """Return STEP color palette and style assignments, including occurrence overrides."""
+        self._require_file(file_path)
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as stream:
+            entities = self._parse_step_entities(stream.read())
+        palette = {}
+        for entity_id, expression in entities.items():
+            kind = self._entity_kind(expression)
+            if kind == "COLOUR_RGB":
+                values = self._numeric_values(expression)
+                if len(values) >= 3:
+                    rgb = tuple(max(0.0, min(1.0, value)) for value in values[-3:])
+                    palette[entity_id] = self._color_record(entity_id, self._entity_name(expression) or "RGB", rgb)
+            elif kind == "DRAUGHTING_PRE_DEFINED_COLOUR":
+                name = (self._entity_name(expression) or "").lower()
+                predefined = {
+                    "black": (0.0, 0.0, 0.0), "white": (1.0, 1.0, 1.0),
+                    "red": (1.0, 0.0, 0.0), "green": (0.0, 1.0, 0.0),
+                    "blue": (0.0, 0.0, 1.0), "yellow": (1.0, 1.0, 0.0),
+                    "magenta": (1.0, 0.0, 1.0), "cyan": (0.0, 1.0, 1.0),
+                }
+                if name in predefined:
+                    palette[entity_id] = self._color_record(entity_id, name, predefined[name])
+
+        assignments = []
+        for entity_id, expression in entities.items():
+            kind = self._entity_kind(expression)
+            if kind not in ("STYLED_ITEM", "OVER_RIDING_STYLED_ITEM", "CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM"):
                 continue
-            y_axis = self._normalize(self._cross(z_axis, x_axis))
-            references.append({
-                "id": "#{}".format(entity_id),
-                "name": name,
-                "type": "COORDINATE_SYSTEM" if kind == "AXIS2_PLACEMENT_3D" else "AXIS",
-                "origin": origin,
-                "x_axis": x_axis,
-                "y_axis": y_axis,
-                "z_axis": z_axis,
+            reachable = self._collect_reachable(entity_id, entities, 8)
+            colors = [palette[item] for item in reachable if item in palette]
+            if not colors:
+                continue
+            target_refs = self._entity_refs(expression)
+            assignments.append({
+                "style_entity": "#{}".format(entity_id),
+                "style_type": kind,
+                "scope": "INSTANCE_OVERRIDE" if "OVER_RIDING" in kind else "GEOMETRY_OR_FACE",
+                "target_entities": ["#{}".format(value) for value in target_refs],
+                "colors": colors,
             })
 
-        return {"reference_count": len(references), "references": references}
+        used_ids = {int(color["entity_id"][1:]) for assignment in assignments for color in assignment["colors"]}
+        return {
+            "palette_count": len(palette),
+            "used_color_count": len(used_ids),
+            "assignment_count": len(assignments),
+            "palette": list(palette.values()),
+            "assignments": assignments,
+            "has_instance_overrides": any(item["scope"] == "INSTANCE_OVERRIDE" for item in assignments),
+        }
+
+    def _datum_from_entity(self, entity_id, name, datum_type, entities):
+        if datum_type == "DATUM_CSYS":
+            return self._placement_reference(entity_id, entities, name, datum_type)
+        if datum_type == "DATUM_POINT":
+            point = self._cartesian_point(entity_id, entities)
+            return {"id": "#{}".format(entity_id), "name": name, "type": datum_type, "origin": point} if point else None
+        if datum_type == "DATUM_PLANE":
+            expression = entities.get(entity_id, "")
+            refs = self._entity_refs(expression)
+            placement_id = self._resolve_entity_of_kinds(refs[0], entities, {"AXIS2_PLACEMENT_3D"}) if refs else None
+            placement = self._placement_reference(placement_id, entities, name, datum_type) if placement_id else None
+            if placement:
+                placement["normal"] = placement.pop("z_axis")
+                placement.pop("x_axis", None)
+                placement.pop("y_axis", None)
+            return placement
+        if datum_type == "DATUM_AXIS":
+            return self._axis_reference(entity_id, entities, name)
+        return None
+
+    def _placement_reference(self, entity_id, entities, name, datum_type):
+        if entity_id is None:
+            return None
+        expression = entities.get(entity_id, "")
+        refs = self._entity_refs(expression)
+        origin = self._cartesian_point(refs[0], entities) if refs else None
+        z_axis_tuple = self._direction(refs[1], entities) if len(refs) > 1 else (0.0, 0.0, 1.0)
+        x_axis_tuple = self._direction(refs[2], entities) if len(refs) > 2 else self._orthogonal_x(z_axis_tuple)
+        if origin is None or z_axis_tuple is None or x_axis_tuple is None:
+            return None
+        y_axis_tuple = self._normalize(self._cross(z_axis_tuple, x_axis_tuple))
+        return {
+            "id": "#{}".format(entity_id), "name": name, "type": datum_type,
+            "origin": origin, "x_axis": self._vector_dict(x_axis_tuple),
+            "y_axis": self._vector_dict(y_axis_tuple), "z_axis": self._vector_dict(z_axis_tuple),
+        }
+
+    def _axis_reference(self, entity_id, entities, name):
+        expression = entities.get(entity_id, "")
+        kind = self._entity_kind(expression)
+        if kind == "AXIS1_PLACEMENT":
+            placement = self._placement_reference(entity_id, entities, name, "DATUM_AXIS")
+            if placement:
+                placement["direction"] = placement["z_axis"]
+            return placement
+        line_id = entity_id if kind == "LINE" else self._resolve_entity_of_kinds(entity_id, entities, {"LINE"})
+        if line_id is None:
+            return None
+        refs = self._entity_refs(entities[line_id])
+        point_id = self._resolve_entity_of_kinds(refs[0], entities, {"CARTESIAN_POINT"}) if refs else None
+        vector_id = self._resolve_entity_of_kinds(refs[1], entities, {"VECTOR", "DIRECTION"}) if len(refs) > 1 else None
+        origin = self._cartesian_point(point_id, entities) if point_id else None
+        direction = self._vector_or_direction(vector_id, entities) if vector_id else None
+        if origin is None or direction is None:
+            return None
+        return {"id": "#{}".format(entity_id), "name": name, "type": "DATUM_AXIS", "origin": origin, "direction": self._vector_dict(direction)}
+
+    def _vector_or_direction(self, entity_id, entities):
+        expression = entities.get(entity_id, "")
+        if self._entity_kind(expression) == "VECTOR":
+            refs = self._entity_refs(expression)
+            return self._direction(refs[0], entities) if refs else None
+        return self._direction(entity_id, entities)
+
+    def _resolve_entity_of_kinds(self, seed_id, entities, target_kinds, visited=None):
+        visited = visited or set()
+        if seed_id in visited or seed_id not in entities:
+            return None
+        visited.add(seed_id)
+        if self._entity_kind(entities[seed_id]) in target_kinds:
+            return seed_id
+        for child in self._entity_refs(entities[seed_id]):
+            result = self._resolve_entity_of_kinds(child, entities, target_kinds, visited)
+            if result is not None:
+                return result
+        return None
+
+    def _collect_reachable(self, seed_id, entities, max_depth):
+        found = set()
+        frontier = [(seed_id, 0)]
+        while frontier:
+            current, depth = frontier.pop()
+            if current in found or current not in entities or depth > max_depth:
+                continue
+            found.add(current)
+            frontier.extend((child, depth + 1) for child in self._entity_refs(entities[current]))
+        return found
+
+    @staticmethod
+    def _reference_owner(layer_name):
+        upper = layer_name.upper()
+        if "ASM" in upper:
+            return "ASSEMBLY"
+        if "PRT" in upper:
+            return "PART"
+        return "UNSPECIFIED"
+
+    @staticmethod
+    def _entity_kind(expression):
+        return expression.split("(", 1)[0].strip().upper()
+
+    @staticmethod
+    def _entity_refs(expression):
+        return [int(value) for value in re.findall(r"#(\d+)", expression)]
+
+    @staticmethod
+    def _numeric_values(expression):
+        return [float(value) for value in re.findall(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:E[-+]?\d+)?", expression, re.I)]
+
+    @staticmethod
+    def _vector_dict(vector):
+        return {"x": vector[0], "y": vector[1], "z": vector[2]}
+
+    @staticmethod
+    def _color_record(entity_id, name, rgb):
+        return {
+            "entity_id": "#{}".format(entity_id), "name": name,
+            "rgb": {"r": rgb[0], "g": rgb[1], "b": rgb[2]},
+            "rgb_255": {"r": int(round(rgb[0] * 255)), "g": int(round(rgb[1] * 255)), "b": int(round(rgb[2] * 255))},
+            "hex": "#{:02X}{:02X}{:02X}".format(int(round(rgb[0] * 255)), int(round(rgb[1] * 255)), int(round(rgb[2] * 255))),
+        }
 
     def _walk_label(self, label, shape_tool, parent_id, depth, path, parent_location, flat_nodes):
         node_id = self._label_entry(label)

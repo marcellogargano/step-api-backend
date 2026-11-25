@@ -16,6 +16,7 @@ CPU renderer:
 B-Rep face IDs remain consistent with /analyze/faces.
 """
 
+import html
 import logging
 import math
 import os
@@ -491,7 +492,8 @@ def render_step_svg(
     show_references: bool = False,
     reference_names: Optional[List[str]] = None,
     reference_entities: Optional[List[Dict[str, Any]]] = None,
-    reference_color: str = "#606060"
+    reference_color: str = "#606060",
+    reference_scale: float = 1.0
 ) -> str:
 
     # ---------------------------------------------------------
@@ -506,6 +508,9 @@ def render_step_svg(
                 file_path
             )
         )
+
+    if reference_scale <= 0.0:
+        raise ValueError("reference_scale must be greater than zero")
 
     if width < 200 or height < 200:
         raise ValueError(
@@ -1236,16 +1241,12 @@ def render_step_svg(
             "</g>\n"
         )
 
-        # Named datum/reference geometry is a separate graphic layer. It is
-        # never included by show_hidden_edges and appears only when explicitly
-        # requested by name.
+        # Named datum/reference geometry is a separate graphic layer. Hidden
+        # edges never enable datum geometry. References appear only on request.
         if show_references and reference_entities:
-            requested = {name.strip().upper() for name in (reference_names or []) if name.strip()}
-            selected = [
-                item for item in reference_entities
-                if item.get("name", "").strip().upper() in requested
-            ]
-            reference_length = 0.15 * max(projected_width, projected_height)
+            selected = list(reference_entities)
+            reference_length = reference_scale * 0.15 * max(projected_width, projected_height)
+            plane_half_size = reference_scale * 0.12 * max(projected_width, projected_height)
             svg.write(
                 '<g fill="none" stroke="{}" stroke-width="1.2" '
                 'stroke-dasharray="7,5" stroke-linecap="round">\n'.format(reference_color)
@@ -1259,31 +1260,57 @@ def render_step_svg(
                     float(height) - (y_offset + (projected_y - projected_y_min) * scale),
                 )
 
+            def vector_tuple(data):
+                if not data or not all(key in data for key in ("x", "y", "z")):
+                    return None
+                return (float(data["x"]), float(data["y"]), float(data["z"]))
+
             for item in selected:
                 origin_data = item.get("origin") or {}
                 if not all(key in origin_data for key in ("x", "y", "z")):
                     continue
-                origin_3d = (origin_data["x"], origin_data["y"], origin_data["z"])
+                origin_3d = (float(origin_data["x"]), float(origin_data["y"]), float(origin_data["z"]))
                 ox, oy = project_reference_point(origin_3d)
-                vectors = []
-                if item.get("type") in ("COORDINATE_SYSTEM", "AXIS"):
+                item_type = item.get("type", "")
+
+                if item_type == "DATUM_PLANE":
+                    normal = vector_tuple(item.get("normal"))
+                    if normal:
+                        helper = (1.0, 0.0, 0.0) if abs(normal[0]) < 0.9 else (0.0, 1.0, 0.0)
+                        plane_x = _normalize(list(_cross(normal, helper)))
+                        plane_y = _normalize(list(_cross(normal, plane_x)))
+                        corners_3d = []
+                        for sx, sy in ((-1,-1),(1,-1),(1,1),(-1,1)):
+                            corners_3d.append((
+                                origin_3d[0] + plane_half_size * (sx * plane_x[0] + sy * plane_y[0]),
+                                origin_3d[1] + plane_half_size * (sx * plane_x[1] + sy * plane_y[1]),
+                                origin_3d[2] + plane_half_size * (sx * plane_x[2] + sy * plane_y[2]),
+                            ))
+                        corners = [project_reference_point(point) for point in corners_3d]
+                        svg.write('<polygon points="{}" fill="{}" fill-opacity="0.10"/>\n'.format(
+                            " ".join("{:.3f},{:.3f}".format(x, y) for x, y in corners), reference_color
+                        ))
+                elif item_type == "DATUM_CSYS":
                     for key in ("x_axis", "y_axis", "z_axis"):
-                        vector = item.get(key)
-                        if vector and all(axis in vector for axis in ("x", "y", "z")):
-                            vectors.append((vector["x"], vector["y"], vector["z"]))
-                if vectors:
-                    for vector in vectors:
-                        endpoint = (
-                            origin_3d[0] + vector[0] * reference_length,
-                            origin_3d[1] + vector[1] * reference_length,
-                            origin_3d[2] + vector[2] * reference_length,
-                        )
+                        vector = vector_tuple(item.get(key))
+                        if not vector:
+                            continue
+                        endpoint = tuple(origin_3d[index] + vector[index] * reference_length for index in range(3))
                         ex, ey = project_reference_point(endpoint)
                         svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(ox, oy, ex, ey))
+                elif item_type == "DATUM_AXIS":
+                    vector = vector_tuple(item.get("direction") or item.get("z_axis"))
+                    if vector:
+                        first = tuple(origin_3d[index] - vector[index] * reference_length for index in range(3))
+                        second = tuple(origin_3d[index] + vector[index] * reference_length for index in range(3))
+                        x1, y1 = project_reference_point(first); x2, y2 = project_reference_point(second)
+                        svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(x1, y1, x2, y2))
                 else:
                     svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(ox - 6, oy, ox + 6, oy))
                     svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(ox, oy - 6, ox, oy + 6))
-                svg.write('<text x="{:.3f}" y="{:.3f}" fill="{}" stroke="none" font-size="14">{}</text>\n'.format(ox + 8, oy - 8, reference_color, item.get("name", "")))
+
+                label = html.escape(str(item.get("name", "")))
+                svg.write('<text x="{:.3f}" y="{:.3f}" fill="{}" stroke="none" font-size="14">{}</text>\n'.format(ox + 8, oy - 8, reference_color, label))
 
             svg.write("</g>\n")
 
