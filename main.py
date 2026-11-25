@@ -1,4 +1,4 @@
-"""STEP File Analysis API V5."""
+"""STEP File Analysis API V6."""
 import json
 import logging
 import os
@@ -15,7 +15,7 @@ from xcaf_processor import XCAFProcessor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-app = FastAPI(title="STEP File Analysis API", version="5.0.0")
+app = FastAPI(title="STEP File Analysis API", version="6.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 processor = STEPProcessor()
 xcaf_processor = XCAFProcessor()
@@ -77,17 +77,27 @@ def select_references(items, selectors):
         return items
     type_map = {"ALL_PLANES": "DATUM_PLANE", "ALL_AXES": "DATUM_AXIS", "ALL_CSYS": "DATUM_CSYS", "ALL_POINTS": "DATUM_POINT"}
     wanted_types = {value for key, value in type_map.items() if key in wanted}
-    return [item for item in items if item.get("name", "").upper() in wanted or item.get("type") in wanted_types]
+    selected = []
+    for item in items:
+        names = {
+            str(item.get("name", "")).upper(),
+            str(item.get("display_name", "")).upper(),
+            str(item.get("id", "")).upper(),
+        }
+        names.update(str(alias).upper() for alias in item.get("aliases", []))
+        if names.intersection(wanted) or item.get("type") in wanted_types:
+            selected.append(item)
+    return selected
 
 
 @app.get("/")
 async def root():
-    return {"status": "healthy", "service": "STEP File Analysis API", "version": "5.0.0"}
+    return {"status": "healthy", "service": "STEP File Analysis API", "version": "6.0.0"}
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "occt_available": processor.is_available(), "xcaf_available": xcaf_processor.is_available(), "version": "5.0.0"}
+    return {"status": "healthy", "occt_available": processor.is_available(), "xcaf_available": xcaf_processor.is_available(), "version": "6.0.0"}
 
 
 async def save_upload(file):
@@ -197,6 +207,7 @@ async def render_cpu(
     display_mode: str = Form("SHADED"),
     highlight_faces: str = Form(""), highlight_color: str = Form("#FF0000"),
     face_colors: str = Form("{}"), component_colors: str = Form("{}"),
+    use_step_colors: bool = Form(True),
     base_color: str = Form("#BFC5CC"), edge_color: str = Form("#000000"), background_color: str = Form("#FFFFFF"),
     show_hidden_edges: bool = Form(False), hidden_edge_color: str = Form("#808080"),
     show_references: bool = Form(False), reference_names: str = Form(""), reference_color: str = Form("#606060"), reference_scale: float = Form(1.0),
@@ -212,6 +223,15 @@ async def render_cpu(
         entities = []
         if show_references and requested:
             entities = select_references(xcaf_processor.analyze_references(step_path).get("references", []), requested)
+
+        # STEP face colors are the base. Explicit user face overrides win.
+        resolved_face_colors = {}
+        if use_step_colors:
+            resolved_face_colors.update(
+                xcaf_processor.analyze_colors(step_path).get("face_colors", {})
+            )
+        resolved_face_colors.update(json_map(face_colors, "face_colors"))
+
         render_step_svg(
             step_path, svg_path, list(view), list(up),
             highlight_faces=csv_list(highlight_faces), highlight_color=highlight_color,
@@ -220,7 +240,7 @@ async def render_cpu(
             show_hidden_edges=show_hidden_edges, hidden_edge_color=hidden_edge_color,
             show_references=show_references, reference_entities=entities, reference_color=reference_color, reference_scale=reference_scale,
             show_reference_labels=show_reference_labels, reference_label_names=csv_list(reference_label_names),
-            face_colors=json_map(face_colors, "face_colors"), component_colors=json_map(component_colors, "component_colors"),
+            face_colors=resolved_face_colors, component_colors=json_map(component_colors, "component_colors"),
             display_mode=display_mode,
         )
         background_tasks.add_task(safe_unlink, step_path); background_tasks.add_task(safe_unlink, svg_path)

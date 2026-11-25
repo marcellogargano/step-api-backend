@@ -263,8 +263,10 @@ def render_step_svg(
                         second = tuple(origin[i]+vector[i]*length for i in range(3))
                         x1,y1=image3(first); x2,y2=image3(second)
                         svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(x1,y1,x2,y2))
-                name = str(item.get("name", ""))
-                if show_reference_labels and (not label_set or name.upper() in label_set or "ALL" in label_set):
+                name = str(item.get("display_name") or item.get("name") or item.get("id") or "")
+                aliases = {str(alias).upper() for alias in item.get("aliases", [])}
+                label_match = name.upper() in label_set or bool(aliases.intersection(label_set))
+                if show_reference_labels and ("ALL" in label_set or label_match):
                     svg.write('<text x="{:.3f}" y="{:.3f}" fill="{}" stroke="none" font-size="14">{}</text>\n'.format(ox+8,oy-8,reference_color,html.escape(name)))
             svg.write('</g>\n')
         svg.write('</svg>\n')

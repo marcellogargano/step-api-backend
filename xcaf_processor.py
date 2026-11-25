@@ -229,13 +229,20 @@ class XCAFProcessor:
                 if target_id is None:
                     continue
                 target_expression = entities[target_id]
-                datum_name = self._entity_name(target_expression) or self._entity_name(entities.get(seed_id, "")) or "#{}".format(target_id)
+                datum_name, datum_aliases = self._best_reference_name(
+                    seed_id,
+                    target_id,
+                    entities,
+                    datum_type,
+                )
                 item = self._datum_from_entity(target_id, datum_name, datum_type, entities)
                 if not item:
                     continue
                 item["layer"] = layer_name
                 item["owner"] = owner
                 item["source_entity"] = "#{}".format(seed_id)
+                item["aliases"] = datum_aliases
+                item["display_name"] = datum_name
                 reference_map[(item["id"], item["type"], layer_name)] = item
 
         references = list(reference_map.values())
@@ -274,11 +281,14 @@ class XCAFProcessor:
             kind = self._entity_kind(expression)
             if kind not in ("STYLED_ITEM", "OVER_RIDING_STYLED_ITEM", "CONTEXT_DEPENDENT_OVER_RIDING_STYLED_ITEM"):
                 continue
-            reachable = self._collect_reachable(entity_id, entities, 8)
-            colors = [palette[item] for item in reachable if item in palette]
+            target_refs = self._entity_refs(expression)
+            style_refs = target_refs[:-1] if len(target_refs) > 1 else target_refs
+            reachable = set()
+            for style_ref in style_refs:
+                reachable.update(self._collect_reachable(style_ref, entities, 8))
+            colors = [palette[item] for item in sorted(reachable) if item in palette]
             if not colors:
                 continue
-            target_refs = self._entity_refs(expression)
             assignments.append({
                 "style_entity": "#{}".format(entity_id),
                 "style_type": kind,
@@ -288,6 +298,40 @@ class XCAFProcessor:
             })
 
         used_ids = {int(color["entity_id"][1:]) for assignment in assignments for color in assignment["colors"]}
+
+        # Build a deterministic FACE_n color table from STEP ADVANCED_FACE order.
+        # This preserves explicit face colors for the common STEP export case.
+        target_colors = {}
+        for assignment in assignments:
+            if assignment["scope"] != "GEOMETRY_OR_FACE" or not assignment["colors"]:
+                continue
+            selected_color = assignment["colors"][0]
+            for target in assignment["target_entities"]:
+                try:
+                    target_id = int(target[1:])
+                except (TypeError, ValueError):
+                    continue
+                if self._entity_kind(entities.get(target_id, "")) == "ADVANCED_FACE":
+                    target_colors[target_id] = selected_color
+
+        advanced_faces = [
+            entity_id for entity_id, expression in entities.items()
+            if self._entity_kind(expression) == "ADVANCED_FACE"
+        ]
+        face_colors = {}
+        face_color_sources = {}
+        for face_index, entity_id in enumerate(advanced_faces, 1):
+            color = target_colors.get(entity_id)
+            if color:
+                face_id = "FACE_{}".format(face_index)
+                face_colors[face_id] = color["hex"]
+                face_color_sources[face_id] = {
+                    "step_face_entity": "#{}".format(entity_id),
+                    "color_entity": color["entity_id"],
+                    "color_name": color["name"],
+                    "hex": color["hex"],
+                }
+
         return {
             "palette_count": len(palette),
             "used_color_count": len(used_ids),
@@ -295,7 +339,60 @@ class XCAFProcessor:
             "palette": list(palette.values()),
             "assignments": assignments,
             "has_instance_overrides": any(item["scope"] == "INSTANCE_OVERRIDE" for item in assignments),
+            "face_colors": face_colors,
+            "face_color_sources": face_color_sources,
+            "face_color_mapping_note": (
+                "FACE_n follows ADVANCED_FACE exchange order. User overrides still have priority."
+            ),
         }
+
+    def _best_reference_name(self, seed_id, target_id, entities, datum_type):
+        """Find the Creo semantic datum name below a layer member.
+
+        Layer members are often presentation wrappers whose own names are
+        numbers. The real name (for example A_1) is usually stored on a
+        TRIMMED_CURVE, AXIS placement or representation item below it.
+        """
+        reachable = self._collect_reachable(seed_id, entities, 12)
+        reachable.add(target_id)
+        candidates = []
+        preferred_kinds = {
+            "DATUM_AXIS": {"TRIMMED_CURVE", "AXIS1_PLACEMENT", "LINE"},
+            "DATUM_PLANE": {"PLANE", "AXIS2_PLACEMENT_3D"},
+            "DATUM_CSYS": {"AXIS2_PLACEMENT_3D"},
+            "DATUM_POINT": {"CARTESIAN_POINT"},
+        }.get(datum_type, set())
+
+        for entity_id in reachable:
+            expression = entities.get(entity_id, "")
+            name = self._entity_name(expression)
+            if not name:
+                continue
+            stripped = name.strip()
+            upper = stripped.upper()
+            numeric_only = bool(re.fullmatch(r"[#0-9_.+-]+", stripped))
+            kind = self._entity_kind(expression)
+            score = 0
+            if kind in preferred_kinds:
+                score += 100
+            if not numeric_only:
+                score += 50
+            if upper.startswith(("A_", "ASM_", "PRT_", "DTM", "CENTER")):
+                score += 50
+            if entity_id == target_id:
+                score += 10
+            candidates.append((score, stripped, entity_id))
+
+        candidates.sort(key=lambda item: (-item[0], item[2]))
+        aliases = []
+        for _, candidate, _ in candidates:
+            if candidate not in aliases:
+                aliases.append(candidate)
+        aliases.extend(value for value in ("#{}".format(seed_id), "#{}".format(target_id)) if value not in aliases)
+
+        if candidates:
+            return candidates[0][1], aliases
+        return "#{}".format(target_id), aliases
 
     def _datum_from_entity(self, entity_id, name, datum_type, entities):
         if datum_type == "DATUM_CSYS":
