@@ -1,4 +1,4 @@
-"""STEP File Analysis API V6."""
+"""STEP File Analysis API V7."""
 import json
 import logging
 import os
@@ -15,7 +15,7 @@ from xcaf_processor import XCAFProcessor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-app = FastAPI(title="STEP File Analysis API", version="6.0.0")
+app = FastAPI(title="STEP File Analysis API", version="7.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 processor = STEPProcessor()
 xcaf_processor = XCAFProcessor()
@@ -92,12 +92,12 @@ def select_references(items, selectors):
 
 @app.get("/")
 async def root():
-    return {"status": "healthy", "service": "STEP File Analysis API", "version": "6.0.0"}
+    return {"status": "healthy", "service": "STEP File Analysis API", "version": "7.0.0"}
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "occt_available": processor.is_available(), "xcaf_available": xcaf_processor.is_available(), "version": "6.0.0"}
+    return {"status": "healthy", "occt_available": processor.is_available(), "xcaf_available": xcaf_processor.is_available(), "version": "7.0.0"}
 
 
 async def save_upload(file):
@@ -157,6 +157,13 @@ async def references(file: UploadFile = File(...)):
 async def colors(file: UploadFile = File(...)):
     path = await save_upload(file)
     try: return xcaf_processor.analyze_colors(path)
+    finally: safe_unlink(path)
+
+
+@app.post("/analyze/instance-colors")
+async def instance_colors(file: UploadFile = File(...)):
+    path = await save_upload(file)
+    try: return xcaf_processor.analyze_instance_colors(path)
     finally: safe_unlink(path)
 
 

@@ -346,41 +346,88 @@ class XCAFProcessor:
             ),
         }
 
-    def _best_reference_name(self, seed_id, target_id, entities, datum_type):
-        """Find the Creo semantic datum name below a layer member.
+    def analyze_instance_colors(self, file_path: str) -> Dict[str, Any]:
+        """Extract occurrence-level and context-dependent STEP style overrides."""
+        self._require_file(file_path)
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as stream:
+            entities = self._parse_step_entities(stream.read())
+        base = self.analyze_colors(file_path)
+        palette = {int(item["entity_id"][1:]): item for item in base.get("palette", [])}
+        occurrences = []
+        for entity_id, expression in entities.items():
+            kind = self._entity_kind(expression)
+            if "OVER_RIDING_STYLED_ITEM" not in kind and "CONTEXT_DEPENDENT" not in kind:
+                continue
+            refs = self._entity_refs(expression)
+            reachable = self._collect_reachable(entity_id, entities, 12)
+            colors = [palette[item] for item in sorted(reachable) if item in palette]
+            if not colors:
+                continue
+            representation_refs = []
+            usage_refs = []
+            for item in reachable:
+                item_kind = self._entity_kind(entities.get(item, ""))
+                if "REPRESENTATION_RELATIONSHIP" in item_kind or "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION" in item_kind:
+                    representation_refs.append("#{}".format(item))
+                if "NEXT_ASSEMBLY_USAGE_OCCURRENCE" in item_kind:
+                    usage_refs.append("#{}".format(item))
+            occurrences.append({
+                "style_entity": "#{}".format(entity_id),
+                "style_type": kind,
+                "target_entities": ["#{}".format(item) for item in refs],
+                "context_entities": representation_refs,
+                "usage_occurrences": usage_refs,
+                "color": colors[0],
+            })
+        return {
+            "occurrence_color_count": len(occurrences),
+            "occurrence_colors": occurrences,
+            "native_instance_mapping_available": False,
+            "note": "Occurrence colors are preserved as STEP presentation metadata. Native XCAF is still required for guaranteed occurrence-to-TopoDS mapping.",
+        }
 
-        Layer members are often presentation wrappers whose own names are
-        numbers. The real name (for example A_1) is usually stored on a
-        TRIMMED_CURVE, AXIS placement or representation item below it.
-        """
-        reachable = self._collect_reachable(seed_id, entities, 12)
+    def _best_reference_name(self, seed_id, target_id, entities, datum_type):
+        """Resolve the Creo semantic datum name instead of a representation number."""
+        reachable = self._collect_reachable(seed_id, entities, 16)
         reachable.add(target_id)
-        candidates = []
+
         preferred_kinds = {
-            "DATUM_AXIS": {"TRIMMED_CURVE", "AXIS1_PLACEMENT", "LINE"},
+            "DATUM_AXIS": {"TRIMMED_CURVE", "AXIS1_PLACEMENT", "GEOMETRIC_CURVE_SET"},
             "DATUM_PLANE": {"PLANE", "AXIS2_PLACEMENT_3D"},
             "DATUM_CSYS": {"AXIS2_PLACEMENT_3D"},
             "DATUM_POINT": {"CARTESIAN_POINT"},
         }.get(datum_type, set())
 
+        candidates = []
         for entity_id in reachable:
             expression = entities.get(entity_id, "")
             name = self._entity_name(expression)
             if not name:
                 continue
             stripped = name.strip()
+            if not stripped:
+                continue
             upper = stripped.upper()
-            numeric_only = bool(re.fullmatch(r"[#0-9_.+-]+", stripped))
+            if re.fullmatch(r"[#0-9_.+\- ]+", stripped):
+                continue
+            if upper in {"", "NONE", "UNSPECIFIED", "DEFAULT"}:
+                continue
             kind = self._entity_kind(expression)
             score = 0
             if kind in preferred_kinds:
                 score += 100
-            if not numeric_only:
-                score += 50
-            if upper.startswith(("A_", "ASM_", "PRT_", "DTM", "CENTER")):
-                score += 50
-            if entity_id == target_id:
-                score += 10
+            if re.fullmatch(r"A[_-]?\d+", upper):
+                score += 500
+            if upper.startswith("ASM_"):
+                score += 450
+            if upper.startswith("PRT_"):
+                score += 450
+            if upper.startswith("DTM"):
+                score += 400
+            if "CENTER" in upper:
+                score += 350
+            if kind == "TRIMMED_CURVE":
+                score += 80
             candidates.append((score, stripped, entity_id))
 
         candidates.sort(key=lambda item: (-item[0], item[2]))
@@ -388,7 +435,9 @@ class XCAFProcessor:
         for _, candidate, _ in candidates:
             if candidate not in aliases:
                 aliases.append(candidate)
-        aliases.extend(value for value in ("#{}".format(seed_id), "#{}".format(target_id)) if value not in aliases)
+        for technical in ("#{}".format(seed_id), str(seed_id), "#{}".format(target_id), str(target_id)):
+            if technical not in aliases:
+                aliases.append(technical)
 
         if candidates:
             return candidates[0][1], aliases
