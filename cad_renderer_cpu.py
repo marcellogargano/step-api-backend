@@ -1,31 +1,14 @@
-"""
-Memory-efficient CPU CAD renderer with Open CASCADE hidden-line removal.
-
-Geometry comes exclusively from the real Open CASCADE B-Rep.
-No OpenGL, VTK, OSMesa or GPU rendering is used.
-
-Open CASCADE:
-    STEP -> TopoDS_Shape -> BRepMesh triangulation
-    STEP -> HLRBRep_Algo -> visible and hidden projected edges
-
-CPU renderer:
-    faces -> compact NumPy arrays -> orthographic SVG fills
-    visible edges -> exact Open CASCADE HLR -> SVG lines
-    hidden edges -> omitted by default, optional dashed lines
-
-B-Rep face IDs remain consistent with /analyze/faces.
-"""
-
+"""CPU-only Open CASCADE STEP renderer with SVG HLR, sections and datum overlays."""
 import html
-import logging
 import math
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-
 from OCC.Core.BRep import BRep_Builder, BRep_Tool
 from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
+from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
+from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeFace
 from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
 from OCC.Core.GeomAbs import GeomAbs_Line
 from OCC.Core.HLRAlgo import HLRAlgo_Projector
@@ -36,441 +19,93 @@ from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED, TopAbs_SO
 from OCC.Core.TopExp import TopExp_Explorer
 from OCC.Core.TopLoc import TopLoc_Location
 from OCC.Core.TopoDS import TopoDS_Compound, topods
-from OCC.Core.gp import gp_Ax2, gp_Dir, gp_Pnt
+from OCC.Core.gp import gp_Ax2, gp_Dir, gp_Pln, gp_Pnt
 
 
-logger = logging.getLogger(__name__)
-
-
-def _normalize(
-    vector: List[float]
-) -> Tuple[float, float, float]:
-
-    if len(vector) != 3:
-        raise ValueError(
-            "Direction vector must contain exactly 3 values"
-        )
-
-    x = float(vector[0])
-    y = float(vector[1])
-    z = float(vector[2])
-
-    magnitude = math.sqrt(
-        x * x +
-        y * y +
-        z * z
-    )
-
-    if magnitude < 1.0e-12:
-        raise ValueError(
-            "Direction vector cannot be zero"
-        )
-
-    return (
-        x / magnitude,
-        y / magnitude,
-        z / magnitude
-    )
-
-
-def _cross(a, b):
-
-    return (
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0]
-    )
+def _normalize(v):
+    if len(v) != 3:
+        raise ValueError("A 3D vector requires three values")
+    m = math.sqrt(sum(float(x) ** 2 for x in v))
+    if m < 1e-12:
+        raise ValueError("Direction vector cannot be zero")
+    return tuple(float(x) / m for x in v)
 
 
 def _dot(a, b):
-
-    return (
-        a[0] * b[0] +
-        a[1] * b[1] +
-        a[2] * b[2]
-    )
+    return sum(a[i] * b[i] for i in range(3))
 
 
-def _validate_color(
-    value: str,
-    name: str
-) -> str:
+def _cross(a, b):
+    return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
 
+
+def _color(value, name):
     value = value.strip().upper()
-
-    if (
-        len(value) != 7
-        or not value.startswith("#")
-    ):
-        raise ValueError(
-            "{} must use #RRGGBB format".format(name)
-        )
-
-    try:
-        int(value[1:], 16)
-
-    except ValueError as exc:
-        raise ValueError(
-            "{} must use #RRGGBB format".format(name)
-        ) from exc
-
+    if len(value) != 7 or not value.startswith("#"):
+        raise ValueError("{} must use #RRGGBB".format(name))
+    int(value[1:], 16)
     return value
 
 
-def _read_and_mesh_step(
-    file_path: str,
-    linear_deflection: float,
-    angular_deflection: float
-):
-
-    logger.info(
-        "CPU RENDER 1: reading STEP"
-    )
-
+def _read_shape(path, linear_deflection, angular_deflection):
     reader = STEPControl_Reader()
-
-    status = reader.ReadFile(
-        file_path
-    )
-
-    if status != IFSelect_RetDone:
-        raise RuntimeError(
-            "Open CASCADE STEP read failed"
-        )
-
-    transferred_roots = (
-        reader.TransferRoots()
-    )
-
-    if transferred_roots <= 0:
-        raise RuntimeError(
-            "Open CASCADE did not transfer any STEP roots"
-        )
-
+    if reader.ReadFile(path) != IFSelect_RetDone:
+        raise RuntimeError("Open CASCADE could not read the STEP file")
+    if reader.TransferRoots() <= 0:
+        raise RuntimeError("No STEP roots were transferred")
     shape = reader.OneShape()
-
     if shape.IsNull():
-        raise RuntimeError(
-            "Open CASCADE returned a null shape"
-        )
-
-    logger.info(
-        "CPU RENDER 2: STEP loaded"
-    )
-
-    logger.info(
-        "CPU RENDER 3: starting BRep meshing"
-    )
-
-    mesher = BRepMesh_IncrementalMesh(
-        shape,
-        linear_deflection,
-        False,
-        angular_deflection,
-        True
-    )
-
-    mesher.Perform()
-
-    if not mesher.IsDone():
-        raise RuntimeError(
-            "Open CASCADE B-Rep meshing failed"
-        )
-
-    logger.info(
-        "CPU RENDER 4: BRep meshing completed"
-    )
-
+        raise RuntimeError("The STEP file produced a null shape")
+    mesh = BRepMesh_IncrementalMesh(shape, linear_deflection, False, angular_deflection, True)
+    mesh.Perform()
+    if not mesh.IsDone():
+        raise RuntimeError("Open CASCADE B-Rep meshing failed")
     return shape
 
 
-def _count_triangles(shape) -> int:
-
-    total = 0
-
-    explorer = TopExp_Explorer(
-        shape,
-        TopAbs_FACE
-    )
-
-    while explorer.More():
-
-        face = topods.Face(
-            explorer.Current()
-        )
-
-        location = TopLoc_Location()
-
-        triangulation = (
-            BRep_Tool.Triangulation(
-                face,
-                location
-            )
-        )
-
-        if triangulation is not None:
-            total += (
-                triangulation.NbTriangles()
-            )
-
-        explorer.Next()
-
-    return total
-
-
-def _sample_hlr_edge(
-    edge,
-    curve_samples: int = 64
-):
-
-    if BRep_Tool.Degenerated(
-        edge
-    ):
-        return None
-
-    adaptor = BRepAdaptor_Curve(
-        edge
-    )
-
-    first_parameter = (
-        adaptor.FirstParameter()
-    )
-
-    last_parameter = (
-        adaptor.LastParameter()
-    )
-
-    if (
-        not math.isfinite(
-            first_parameter
-        )
-        or not math.isfinite(
-            last_parameter
-        )
-    ):
-        return None
-
-    if abs(
-        last_parameter
-        - first_parameter
-    ) < 1.0e-14:
-        return None
-
-    if adaptor.GetType() == GeomAbs_Line:
-        sample_count = 2
-    else:
-        sample_count = curve_samples
-
-    parameters = np.linspace(
-        first_parameter,
-        last_parameter,
-        sample_count,
-        dtype=np.float64
-    )
-
-    projected_points = []
-
-    for parameter in parameters:
-
-        point = adaptor.Value(
-            float(parameter)
-        )
-
-        candidate = (
-            point.X(),
-            point.Y()
-        )
-
-        if not projected_points:
-
-            projected_points.append(
-                candidate
-            )
-
-            continue
-
-        previous_point = (
-            projected_points[-1]
-        )
-
-        if (
-            abs(
-                candidate[0]
-                - previous_point[0]
-            ) > 1.0e-10
-            or
-            abs(
-                candidate[1]
-                - previous_point[1]
-            ) > 1.0e-10
-        ):
-            projected_points.append(
-                candidate
-            )
-
-    if len(
-        projected_points
-    ) < 2:
-        return None
-
-    return projected_points
-
-
-def _extract_edges_from_hlr_shape(
-    hlr_shape
-):
-
-    projected_edges = []
-
-    if (
-        hlr_shape is None
-        or hlr_shape.IsNull()
-    ):
-        return projected_edges
-
-    explorer = TopExp_Explorer(
-        hlr_shape,
-        TopAbs_EDGE
-    )
-
-    while explorer.More():
-
-        edge = topods.Edge(
-            explorer.Current()
-        )
-
-        try:
-
-            projected_points = (
-                _sample_hlr_edge(
-                    edge
-                )
-            )
-
-            if projected_points:
-
-                projected_edges.append(
-                    projected_points
-                )
-
-        except Exception as exc:
-
-            logger.warning(
-                "Could not sample one HLR edge: {}".format(
-                    exc
-                )
-            )
-
-        explorer.Next()
-
-    return projected_edges
-
-
-def _extract_hlr_edge_sets(
-    shape,
-    view,
-    right,
-    show_hidden_edges: bool
-):
-
-    logger.info(
-        "CPU RENDER 9: running exact Open CASCADE HLR"
-    )
-
-    # view_direction points from camera toward the model.
-    # The HLR projection-axis normal points toward the camera.
-
-    eye_direction = (
-        -view[0],
-        -view[1],
-        -view[2]
-    )
-
-    projection_axis = gp_Ax2(
-        gp_Pnt(
-            0.0,
-            0.0,
-            0.0
-        ),
-        gp_Dir(
-            eye_direction[0],
-            eye_direction[1],
-            eye_direction[2]
-        ),
-        gp_Dir(
-            right[0],
-            right[1],
-            right[2]
-        )
-    )
-
-    # HLR must receive only real solid geometry. Free datum axes, datum planes,
-    # construction wires and isolated edges are intentionally excluded here.
-    # Named references are rendered separately only when explicitly requested.
+def _hlr_edges(shape, view, right, hidden):
     solid_compound = TopoDS_Compound()
-    solid_builder = BRep_Builder()
-    solid_builder.MakeCompound(solid_compound)
-    solid_explorer = TopExp_Explorer(shape, TopAbs_SOLID)
-    solid_count = 0
+    builder = BRep_Builder()
+    builder.MakeCompound(solid_compound)
+    ex = TopExp_Explorer(shape, TopAbs_SOLID)
+    count = 0
+    while ex.More():
+        builder.Add(solid_compound, ex.Current())
+        count += 1
+        ex.Next()
+    hlr_shape = solid_compound if count else shape
+    axis = gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(-view[0], -view[1], -view[2]), gp_Dir(*right))
+    algo = HLRBRep_Algo()
+    algo.Add(hlr_shape)
+    algo.Projector(HLRAlgo_Projector(axis))
+    algo.Update()
+    algo.Hide()
+    result = HLRBRep_HLRToShape(algo)
 
-    while solid_explorer.More():
-        solid_builder.Add(solid_compound, solid_explorer.Current())
-        solid_count += 1
-        solid_explorer.Next()
+    def extract(compounds):
+        output = []
+        for compound in compounds:
+            if compound is None or compound.IsNull():
+                continue
+            edge_ex = TopExp_Explorer(compound, TopAbs_EDGE)
+            while edge_ex.More():
+                edge = topods.Edge(edge_ex.Current())
+                if not BRep_Tool.Degenerated(edge):
+                    adaptor = BRepAdaptor_Curve(edge)
+                    first, last = adaptor.FirstParameter(), adaptor.LastParameter()
+                    if math.isfinite(first) and math.isfinite(last) and abs(last-first) > 1e-14:
+                        n = 2 if adaptor.GetType() == GeomAbs_Line else 64
+                        pts = []
+                        for parameter in np.linspace(first, last, n):
+                            point = adaptor.Value(float(parameter))
+                            pts.append((point.X(), point.Y()))
+                        output.append(pts)
+                edge_ex.Next()
+        return output
 
-    hlr_shape = solid_compound if solid_count > 0 else shape
-
-    algorithm = HLRBRep_Algo()
-
-    algorithm.Add(
-        hlr_shape
-    )
-
-    projector = HLRAlgo_Projector(
-        projection_axis
-    )
-
-    algorithm.Projector(
-        projector
-    )
-
-    algorithm.Update()
-
-    algorithm.Hide()
-
-    hlr_result = HLRBRep_HLRToShape(
-        algorithm
-    )
-
-    # A complete engineering view is the union of real visible sharp edges
-    # and view-dependent apparent contours (silhouettes). OutLineVCompound
-    # supplies cylinder/sphere/torus contours that are not real B-Rep edges.
-    visible_edges = []
-    visible_edges.extend(_extract_edges_from_hlr_shape(hlr_result.VCompound()))
-    visible_edges.extend(_extract_edges_from_hlr_shape(hlr_result.OutLineVCompound()))
-
-    hidden_edges = []
-
-    if show_hidden_edges:
-        hidden_edges.extend(_extract_edges_from_hlr_shape(hlr_result.HCompound()))
-        hidden_edges.extend(_extract_edges_from_hlr_shape(hlr_result.OutLineHCompound()))
-
-    logger.info(
-        "CPU RENDER 10: HLR extracted "
-        "{} visible and {} hidden edges".format(
-            len(
-                visible_edges
-            ),
-            len(
-                hidden_edges
-            )
-        )
-    )
-
-    return (
-        visible_edges,
-        hidden_edges
-    )
+    visible = extract([result.VCompound(), result.OutLineVCompound()])
+    hidden_edges = extract([result.HCompound(), result.OutLineHCompound()]) if hidden else []
+    return visible, hidden_edges
 
 
 def render_step_svg(
@@ -490,942 +125,177 @@ def render_step_svg(
     show_hidden_edges: bool = False,
     hidden_edge_color: str = "#808080",
     show_references: bool = False,
-    reference_names: Optional[List[str]] = None,
     reference_entities: Optional[List[Dict[str, Any]]] = None,
     reference_color: str = "#606060",
-    reference_scale: float = 1.0
+    reference_scale: float = 1.0,
+    show_reference_labels: bool = False,
+    reference_label_names: Optional[List[str]] = None,
+    face_colors: Optional[Dict[str, str]] = None,
+    component_colors: Optional[Dict[str, str]] = None,
+    display_mode: str = "SHADED",
 ) -> str:
-
-    # ---------------------------------------------------------
-    # INPUT VALIDATION
-    # ---------------------------------------------------------
-
-    if not os.path.exists(
-        file_path
-    ):
-        raise FileNotFoundError(
-            "STEP file not found: {}".format(
-                file_path
-            )
-        )
-
-    if reference_scale <= 0.0:
+    del component_colors  # Reserved for native XCAF component-to-shape mapping.
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(file_path)
+    if width < 200 or height < 200 or width > 4000 or height > 4000:
+        raise ValueError("Image dimensions must be between 200 and 4000")
+    if reference_scale <= 0:
         raise ValueError("reference_scale must be greater than zero")
+    display_mode = display_mode.strip().upper()
+    if display_mode not in {"SHADED", "WIREFRAME", "HIDDEN_LINE", "HIDDEN_LINE_DASHED"}:
+        raise ValueError("Unsupported display_mode")
+    if display_mode == "HIDDEN_LINE_DASHED":
+        show_hidden_edges = True
+    highlight_color = _color(highlight_color, "highlight_color")
+    base_color = _color(base_color, "base_color")
+    edge_color = _color(edge_color, "edge_color")
+    background_color = _color(background_color, "background_color")
+    hidden_edge_color = _color(hidden_edge_color, "hidden_edge_color")
+    reference_color = _color(reference_color, "reference_color")
+    face_colors = {k.strip().upper(): _color(v, "face_colors") for k, v in (face_colors or {}).items()}
+    highlight_set = {x.strip().upper() for x in (highlight_faces or [])}
+    label_set = {x.strip().upper() for x in (reference_label_names or [])}
 
-    if width < 200 or height < 200:
-        raise ValueError(
-            "SVG width and height must be at least 200 pixels"
-        )
+    view = _normalize(view_direction)
+    requested_up = _normalize(up_direction)
+    right = _normalize(_cross(view, requested_up))
+    up = _normalize(_cross(right, view))
+    shape = _read_shape(file_path, linear_deflection, angular_deflection)
 
-    if (
-        linear_deflection <= 0
-        or angular_deflection <= 0
-    ):
-        raise ValueError(
-            "Mesh deflections must be greater than zero"
-        )
-
-    highlight_color = _validate_color(
-        highlight_color,
-        "highlight_color"
-    )
-
-    base_color = _validate_color(
-        base_color,
-        "base_color"
-    )
-
-    edge_color = _validate_color(
-        edge_color,
-        "edge_color"
-    )
-
-    hidden_edge_color = _validate_color(
-        hidden_edge_color,
-        "hidden_edge_color"
-    )
-
-    reference_color = _validate_color(
-        reference_color,
-        "reference_color"
-    )
-
-    background_color = _validate_color(
-        background_color,
-        "background_color"
-    )
-
-    # ---------------------------------------------------------
-    # CAMERA BASIS
-    # ---------------------------------------------------------
-
-    view = _normalize(
-        view_direction
-    )
-
-    requested_up = _normalize(
-        up_direction
-    )
-
-    right_raw = _cross(
-        view,
-        requested_up
-    )
-
-    right_length = math.sqrt(
-        _dot(
-            right_raw,
-            right_raw
-        )
-    )
-
-    if right_length < 1.0e-12:
-        raise ValueError(
-            "view_direction and up_direction cannot be parallel"
-        )
-
-    right = _normalize(
-        list(
-            right_raw
-        )
-    )
-
-    up = _normalize(
-        list(
-            _cross(
-                right,
-                view
-            )
-        )
-    )
-
-    # ---------------------------------------------------------
-    # FACE SELECTION
-    # ---------------------------------------------------------
-
-    highlight_set = {
-        str(face_id).strip().upper()
-        for face_id in (
-            highlight_faces or []
-        )
-        if str(face_id).strip()
-    }
-
-    # ---------------------------------------------------------
-    # READ AND MESH STEP
-    # ---------------------------------------------------------
-
-    shape = _read_and_mesh_step(
-        file_path,
-        linear_deflection,
-        angular_deflection
-    )
-
-    # ---------------------------------------------------------
-    # COUNT TRIANGLES
-    # ---------------------------------------------------------
-
-    logger.info(
-        "CPU RENDER 5: counting B-Rep triangles"
-    )
-
-    triangle_count = _count_triangles(
-        shape
-    )
-
-    if triangle_count <= 0:
-        raise RuntimeError(
-            "Open CASCADE did not generate any display triangles"
-        )
-
-    logger.info(
-        "CPU RENDER 6: allocating compact arrays "
-        "for {} triangles".format(
-            triangle_count
-        )
-    )
-
-    # ---------------------------------------------------------
-    # COMPACT TRIANGLE ARRAYS
-    # ---------------------------------------------------------
-
-    points = np.empty(
-        (
-            triangle_count,
-            3,
-            2
-        ),
-        dtype=np.float32
-    )
-
-    depths = np.empty(
-        triangle_count,
-        dtype=np.float32
-    )
-
-    highlighted = np.zeros(
-        triangle_count,
-        dtype=np.uint8
-    )
-
-    projected_x_min = float(
-        "inf"
-    )
-
-    projected_x_max = float(
-        "-inf"
-    )
-
-    projected_y_min = float(
-        "inf"
-    )
-
-    projected_y_max = float(
-        "-inf"
-    )
-
-    # ---------------------------------------------------------
-    # PROJECT FACE TRIANGLES
-    # ---------------------------------------------------------
-
-    explorer = TopExp_Explorer(
-        shape,
-        TopAbs_FACE
-    )
-
+    triangles, depths, tri_colors = [], [], []
+    xmin = ymin = float("inf")
+    xmax = ymax = float("-inf")
+    ex = TopExp_Explorer(shape, TopAbs_FACE)
     face_index = 1
-    write_index = 0
-
-    logger.info(
-        "CPU RENDER 7: extracting projected triangles"
-    )
-
-    while explorer.More():
-
-        face = topods.Face(
-            explorer.Current()
-        )
-
-        face_id = "FACE_{}".format(
-            face_index
-        )
-
+    while ex.More():
+        face = topods.Face(ex.Current())
+        face_id = "FACE_{}".format(face_index)
         location = TopLoc_Location()
-
-        triangulation = (
-            BRep_Tool.Triangulation(
-                face,
-                location
-            )
-        )
-
+        triangulation = BRep_Tool.Triangulation(face, location)
         if triangulation is not None:
-
-            transformation = (
-                location.Transformation()
-            )
-
-            reversed_face = (
-                face.Orientation()
-                == TopAbs_REVERSED
-            )
-
-            if face_id in highlight_set:
-                is_highlighted = 1
-            else:
-                is_highlighted = 0
-
-            triangle_total = (
-                triangulation.NbTriangles()
-            )
-
-            for triangle_index in range(
-                1,
-                triangle_total + 1
-            ):
-
-                triangle = (
-                    triangulation.Triangle(
-                        triangle_index
-                    )
-                )
-
-                node_1, node_2, node_3 = (
-                    triangle.Get()
-                )
-
+            transform = location.Transformation()
+            reversed_face = face.Orientation() == TopAbs_REVERSED
+            current_color = highlight_color if face_id in highlight_set else face_colors.get(face_id, base_color)
+            for index in range(1, triangulation.NbTriangles()+1):
+                nodes = list(triangulation.Triangle(index).Get())
                 if reversed_face:
-
-                    node_2, node_3 = (
-                        node_3,
-                        node_2
-                    )
-
-                depth_sum = 0.0
-
-                for (
-                    local_index,
-                    node_index
-                ) in enumerate(
-                    (
-                        node_1,
-                        node_2,
-                        node_3
-                    )
-                ):
-
-                    point = (
-                        triangulation.Node(
-                            node_index
-                        ).Transformed(
-                            transformation
-                        )
-                    )
-
-                    point_3d = (
-                        point.X(),
-                        point.Y(),
-                        point.Z()
-                    )
-
-                    projected_x = _dot(
-                        point_3d,
-                        right
-                    )
-
-                    projected_y = _dot(
-                        point_3d,
-                        up
-                    )
-
-                    projected_depth = _dot(
-                        point_3d,
-                        view
-                    )
-
-                    points[
-                        write_index,
-                        local_index,
-                        0
-                    ] = projected_x
-
-                    points[
-                        write_index,
-                        local_index,
-                        1
-                    ] = projected_y
-
-                    depth_sum += (
-                        projected_depth
-                    )
-
-                    projected_x_min = min(
-                        projected_x_min,
-                        projected_x
-                    )
-
-                    projected_x_max = max(
-                        projected_x_max,
-                        projected_x
-                    )
-
-                    projected_y_min = min(
-                        projected_y_min,
-                        projected_y
-                    )
-
-                    projected_y_max = max(
-                        projected_y_max,
-                        projected_y
-                    )
-
-                depths[
-                    write_index
-                ] = depth_sum / 3.0
-
-                highlighted[
-                    write_index
-                ] = is_highlighted
-
-                write_index += 1
-
+                    nodes[1], nodes[2] = nodes[2], nodes[1]
+                projected, depth = [], 0.0
+                for node in nodes:
+                    point = triangulation.Node(node).Transformed(transform)
+                    xyz = (point.X(), point.Y(), point.Z())
+                    px, py = _dot(xyz, right), _dot(xyz, up)
+                    projected.append((px, py))
+                    depth += _dot(xyz, view)
+                    xmin, xmax, ymin, ymax = min(xmin, px), max(xmax, px), min(ymin, py), max(ymax, py)
+                triangles.append(projected)
+                depths.append(depth/3.0)
+                tri_colors.append(current_color)
         face_index += 1
+        ex.Next()
+    if not triangles:
+        raise RuntimeError("No B-Rep display triangles were extracted")
 
-        explorer.Next()
-
-    if write_index <= 0:
-        raise RuntimeError(
-            "No projected B-Rep triangles were extracted"
-        )
-
-    if write_index != triangle_count:
-
-        points = points[
-            :write_index
-        ]
-
-        depths = depths[
-            :write_index
-        ]
-
-        highlighted = highlighted[
-            :write_index
-        ]
-
-        triangle_count = write_index
-
-    logger.info(
-        "CPU RENDER 8: extracted {} triangles".format(
-            triangle_count
-        )
-    )
-
-    # ---------------------------------------------------------
-    # EXACT HIDDEN-LINE REMOVAL
-    # ---------------------------------------------------------
-
-    visible_edges, hidden_edges = (
-        _extract_hlr_edge_sets(
-            shape,
-            view,
-            right,
-            show_hidden_edges
-        )
-    )
-
-    # ---------------------------------------------------------
-    # PROJECTED EXTENTS
-    # ---------------------------------------------------------
-
-    projected_width = (
-        projected_x_max
-        - projected_x_min
-    )
-
-    projected_height = (
-        projected_y_max
-        - projected_y_min
-    )
-
-    if (
-        projected_width <= 1.0e-12
-        or projected_height <= 1.0e-12
-    ):
-        raise RuntimeError(
-            "Invalid projected model dimensions"
-        )
-
+    visible, hidden = _hlr_edges(shape, view, right, show_hidden_edges)
+    span_x, span_y = max(xmax-xmin, 1e-9), max(ymax-ymin, 1e-9)
     margin = 40.0
+    scale = min((width-2*margin)/span_x, (height-2*margin)/span_y)
+    xoff, yoff = (width-span_x*scale)/2, (height-span_y*scale)/2
 
-    usable_width = max(
-        1.0,
-        float(width)
-        - 2.0 * margin
-    )
+    def image2(point):
+        return (xoff+(point[0]-xmin)*scale, height-(yoff+(point[1]-ymin)*scale))
 
-    usable_height = max(
-        1.0,
-        float(height)
-        - 2.0 * margin
-    )
+    def image3(point):
+        return image2((_dot(point, right), _dot(point, up)))
 
-    scale = min(
-        usable_width / projected_width,
-        usable_height / projected_height
-    )
+    with open(output_path, "w", encoding="utf-8") as svg:
+        svg.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        svg.write('<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">\n'.format(width,height,width,height))
+        svg.write('<rect width="{}" height="{}" fill="{}"/>\n'.format(width,height,background_color))
+        if display_mode == "SHADED":
+            for idx in np.argsort(np.asarray(depths))[::-1]:
+                pts = [image2(p) for p in triangles[int(idx)]]
+                svg.write('<polygon points="{}" fill="{}" stroke="none"/>\n'.format(" ".join("{:.3f},{:.3f}".format(*p) for p in pts), tri_colors[int(idx)]))
+        elif display_mode in {"HIDDEN_LINE", "HIDDEN_LINE_DASHED"}:
+            for idx in np.argsort(np.asarray(depths))[::-1]:
+                pts = [image2(p) for p in triangles[int(idx)]]
+                svg.write('<polygon points="{}" fill="#FFFFFF" stroke="none"/>\n'.format(" ".join("{:.3f},{:.3f}".format(*p) for p in pts)))
+        if show_hidden_edges and hidden:
+            svg.write('<g fill="none" stroke="{}" stroke-width="1" stroke-dasharray="6,6">\n'.format(hidden_edge_color))
+            for edge in hidden:
+                svg.write('<polyline points="{}"/>\n'.format(" ".join("{:.3f},{:.3f}".format(*image2(p)) for p in edge)))
+            svg.write('</g>\n')
+        svg.write('<g fill="none" stroke="{}" stroke-width="1.5">\n'.format(edge_color))
+        for edge in visible:
+            svg.write('<polyline points="{}"/>\n'.format(" ".join("{:.3f},{:.3f}".format(*image2(p)) for p in edge)))
+        svg.write('</g>\n')
 
-    rendered_width = (
-        projected_width
-        * scale
-    )
-
-    rendered_height = (
-        projected_height
-        * scale
-    )
-
-    x_offset = (
-        float(width)
-        - rendered_width
-    ) / 2.0
-
-    y_offset = (
-        float(height)
-        - rendered_height
-    ) / 2.0
-
-    # ---------------------------------------------------------
-    # CONVERT FACE POINTS TO IMAGE COORDINATES
-    # ---------------------------------------------------------
-
-    points[:, :, 0] = (
-        x_offset
-        + (
-            points[:, :, 0]
-            - projected_x_min
-        ) * scale
-    )
-
-    points[:, :, 1] = (
-        float(height)
-        - (
-            y_offset
-            + (
-                points[:, :, 1]
-                - projected_y_min
-            ) * scale
-        )
-    )
-
-    logger.info(
-        "CPU RENDER 11: sorting triangles by depth"
-    )
-
-    draw_order = np.argsort(
-        depths
-    )[::-1]
-
-    def hlr_to_image(
-        projected_point
-    ):
-
-        image_x = (
-            x_offset
-            + (
-                projected_point[0]
-                - projected_x_min
-            ) * scale
-        )
-
-        image_y = (
-            float(height)
-            - (
-                y_offset
-                + (
-                    projected_point[1]
-                    - projected_y_min
-                ) * scale
-            )
-        )
-
-        return (
-            image_x,
-            image_y
-        )
-
-    # ---------------------------------------------------------
-    # WRITE SVG
-    # ---------------------------------------------------------
-
-    logger.info(
-        "CPU RENDER 12: writing SVG"
-    )
-
-    with open(
-        output_path,
-        "w",
-        encoding="utf-8"
-    ) as svg:
-
-        svg.write(
-            '<?xml version="1.0" '
-            'encoding="UTF-8"?>\n'
-        )
-
-        svg.write(
-            '<svg '
-            'xmlns="http://www.w3.org/2000/svg" '
-            'width="{}" '
-            'height="{}" '
-            'viewBox="0 0 {} {}">\n'.format(
-                width,
-                height,
-                width,
-                height
-            )
-        )
-
-        svg.write(
-            '<rect '
-            'x="0" '
-            'y="0" '
-            'width="{}" '
-            'height="{}" '
-            'fill="{}"/>\n'.format(
-                width,
-                height,
-                background_color
-            )
-        )
-
-        # -----------------------------------------------------
-        # FILLED FACE TRIANGLES
-        # -----------------------------------------------------
-
-        face_buffer = []
-        buffer_limit = 2000
-
-        for ordered_index in draw_order:
-
-            triangle_points = points[
-                ordered_index
-            ]
-
-            if highlighted[
-                ordered_index
-            ]:
-                color = highlight_color
-            else:
-                color = base_color
-
-            polygon_points = (
-                "{:.3f},{:.3f} "
-                "{:.3f},{:.3f} "
-                "{:.3f},{:.3f}"
-            ).format(
-                float(
-                    triangle_points[0, 0]
-                ),
-                float(
-                    triangle_points[0, 1]
-                ),
-                float(
-                    triangle_points[1, 0]
-                ),
-                float(
-                    triangle_points[1, 1]
-                ),
-                float(
-                    triangle_points[2, 0]
-                ),
-                float(
-                    triangle_points[2, 1]
-                )
-            )
-
-            face_buffer.append(
-                '<polygon '
-                'points="{}" '
-                'fill="{}" '
-                'stroke="none"/>\n'.format(
-                    polygon_points,
-                    color
-                )
-            )
-
-            if len(
-                face_buffer
-            ) >= buffer_limit:
-
-                svg.write(
-                    "".join(
-                        face_buffer
-                    )
-                )
-
-                face_buffer.clear()
-
-        if face_buffer:
-
-            svg.write(
-                "".join(
-                    face_buffer
-                )
-            )
-
-        # -----------------------------------------------------
-        # OPTIONAL HIDDEN EDGES
-        # -----------------------------------------------------
-
-        if (
-            show_hidden_edges
-            and hidden_edges
-        ):
-
-            svg.write(
-                '<g '
-                'fill="none" '
-                'stroke="{}" '
-                'stroke-width="1.0" '
-                'stroke-dasharray="6,6" '
-                'stroke-linecap="round" '
-                'stroke-linejoin="round">\n'.format(
-                    hidden_edge_color
-                )
-            )
-
-            for edge_points in hidden_edges:
-
-                svg_points = []
-
-                for point in edge_points:
-
-                    image_x, image_y = (
-                        hlr_to_image(
-                            point
-                        )
-                    )
-
-                    svg_points.append(
-                        "{:.3f},{:.3f}".format(
-                            image_x,
-                            image_y
-                        )
-                    )
-
-                if len(
-                    svg_points
-                ) >= 2:
-
-                    svg.write(
-                        '<polyline '
-                        'points="{}"/>\n'.format(
-                            " ".join(
-                                svg_points
-                            )
-                        )
-                    )
-
-            svg.write(
-                "</g>\n"
-            )
-
-        # -----------------------------------------------------
-        # VISIBLE EDGES ONLY
-        # -----------------------------------------------------
-
-        svg.write(
-            '<g '
-            'fill="none" '
-            'stroke="{}" '
-            'stroke-width="1.5" '
-            'stroke-linecap="round" '
-            'stroke-linejoin="round">\n'.format(
-                edge_color
-            )
-        )
-
-        for edge_points in visible_edges:
-
-            svg_points = []
-
-            for point in edge_points:
-
-                image_x, image_y = (
-                    hlr_to_image(
-                        point
-                    )
-                )
-
-                svg_points.append(
-                    "{:.3f},{:.3f}".format(
-                        image_x,
-                        image_y
-                    )
-                )
-
-            if len(
-                svg_points
-            ) >= 2:
-
-                svg.write(
-                    '<polyline '
-                    'points="{}"/>\n'.format(
-                        " ".join(
-                            svg_points
-                        )
-                    )
-                )
-
-        svg.write(
-            "</g>\n"
-        )
-
-        # Named datum/reference geometry is a separate graphic layer. Hidden
-        # edges never enable datum geometry. References appear only on request.
         if show_references and reference_entities:
-            selected = list(reference_entities)
-            reference_length = reference_scale * 0.15 * max(projected_width, projected_height)
-            plane_half_size = reference_scale * 0.12 * max(projected_width, projected_height)
-            svg.write(
-                '<g fill="none" stroke="{}" stroke-width="1.2" '
-                'stroke-dasharray="7,5" stroke-linecap="round">\n'.format(reference_color)
-            )
-
-            def project_reference_point(point_3d):
-                projected_x = _dot(point_3d, right)
-                projected_y = _dot(point_3d, up)
-                return (
-                    x_offset + (projected_x - projected_x_min) * scale,
-                    float(height) - (y_offset + (projected_y - projected_y_min) * scale),
-                )
-
-            def vector_tuple(data):
-                if not data or not all(key in data for key in ("x", "y", "z")):
-                    return None
-                return (float(data["x"]), float(data["y"]), float(data["z"]))
-
-            for item in selected:
+            length = reference_scale * 0.15 * max(span_x, span_y)
+            half = reference_scale * 0.12 * max(span_x, span_y)
+            svg.write('<g fill="none" stroke="{}" stroke-width="1.2" stroke-dasharray="7,5">\n'.format(reference_color))
+            for item in reference_entities:
                 origin_data = item.get("origin") or {}
-                if not all(key in origin_data for key in ("x", "y", "z")):
+                if not all(k in origin_data for k in ("x","y","z")):
                     continue
-                origin_3d = (float(origin_data["x"]), float(origin_data["y"]), float(origin_data["z"]))
-                ox, oy = project_reference_point(origin_3d)
-                item_type = item.get("type", "")
-
-                if item_type == "DATUM_PLANE":
-                    normal = vector_tuple(item.get("normal"))
-                    if normal:
-                        helper = (1.0, 0.0, 0.0) if abs(normal[0]) < 0.9 else (0.0, 1.0, 0.0)
-                        plane_x = _normalize(list(_cross(normal, helper)))
-                        plane_y = _normalize(list(_cross(normal, plane_x)))
-                        corners_3d = []
-                        for sx, sy in ((-1,-1),(1,-1),(1,1),(-1,1)):
-                            corners_3d.append((
-                                origin_3d[0] + plane_half_size * (sx * plane_x[0] + sy * plane_y[0]),
-                                origin_3d[1] + plane_half_size * (sx * plane_x[1] + sy * plane_y[1]),
-                                origin_3d[2] + plane_half_size * (sx * plane_x[2] + sy * plane_y[2]),
-                            ))
-                        corners = [project_reference_point(point) for point in corners_3d]
-                        svg.write('<polygon points="{}" fill="{}" fill-opacity="0.10"/>\n'.format(
-                            " ".join("{:.3f},{:.3f}".format(x, y) for x, y in corners), reference_color
-                        ))
-                elif item_type == "DATUM_CSYS":
-                    for key in ("x_axis", "y_axis", "z_axis"):
-                        vector = vector_tuple(item.get(key))
-                        if not vector:
-                            continue
-                        endpoint = tuple(origin_3d[index] + vector[index] * reference_length for index in range(3))
-                        ex, ey = project_reference_point(endpoint)
-                        svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(ox, oy, ex, ey))
-                elif item_type == "DATUM_AXIS":
-                    vector = vector_tuple(item.get("direction") or item.get("z_axis"))
-                    if vector:
-                        first = tuple(origin_3d[index] - vector[index] * reference_length for index in range(3))
-                        second = tuple(origin_3d[index] + vector[index] * reference_length for index in range(3))
-                        x1, y1 = project_reference_point(first); x2, y2 = project_reference_point(second)
-                        svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(x1, y1, x2, y2))
+                origin = tuple(float(origin_data[k]) for k in ("x","y","z"))
+                ox, oy = image3(origin)
+                item_type = item.get("type")
+                if item_type == "DATUM_PLANE" and item.get("normal"):
+                    normal = tuple(item["normal"][k] for k in ("x","y","z"))
+                    helper = (1,0,0) if abs(normal[0]) < 0.9 else (0,1,0)
+                    ux = _normalize(_cross(normal, helper)); uy = _normalize(_cross(normal, ux))
+                    corners = []
+                    for sx, sy in ((-1,-1),(1,-1),(1,1),(-1,1)):
+                        corners.append(image3(tuple(origin[i]+half*(sx*ux[i]+sy*uy[i]) for i in range(3))))
+                    svg.write('<polygon points="{}" fill="{}" fill-opacity="0.10"/>\n'.format(" ".join("{:.3f},{:.3f}".format(*p) for p in corners), reference_color))
                 else:
-                    svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(ox - 6, oy, ox + 6, oy))
-                    svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(ox, oy - 6, ox, oy + 6))
-
-                label = html.escape(str(item.get("name", "")))
-                svg.write('<text x="{:.3f}" y="{:.3f}" fill="{}" stroke="none" font-size="14">{}</text>\n'.format(ox + 8, oy - 8, reference_color, label))
-
-            svg.write("</g>\n")
-
-        svg.write(
-            "</svg>\n"
-        )
-
-    # ---------------------------------------------------------
-    # VERIFY OUTPUT
-    # ---------------------------------------------------------
-
-    if not os.path.exists(
-        output_path
-    ):
-        raise RuntimeError(
-            "SVG file was not generated"
-        )
-
-    output_size = os.path.getsize(
-        output_path
-    )
-
-    if output_size <= 0:
-        raise RuntimeError(
-            "Generated SVG file is empty"
-        )
-
-    logger.info(
-        "CPU RENDER 13: "
-        "SVG generated, size={} bytes".format(
-            output_size
-        )
-    )
-
+                    vectors = []
+                    if item_type == "DATUM_CSYS":
+                        vectors = [item.get(k) for k in ("x_axis","y_axis","z_axis")]
+                    elif item_type == "DATUM_AXIS":
+                        vectors = [item.get("direction") or item.get("z_axis")]
+                    for data in vectors:
+                        if not data:
+                            continue
+                        vector = tuple(float(data[k]) for k in ("x","y","z"))
+                        first = tuple(origin[i]-vector[i]*length for i in range(3)) if item_type == "DATUM_AXIS" else origin
+                        second = tuple(origin[i]+vector[i]*length for i in range(3))
+                        x1,y1=image3(first); x2,y2=image3(second)
+                        svg.write('<line x1="{:.3f}" y1="{:.3f}" x2="{:.3f}" y2="{:.3f}"/>\n'.format(x1,y1,x2,y2))
+                name = str(item.get("name", ""))
+                if show_reference_labels and (not label_set or name.upper() in label_set or "ALL" in label_set):
+                    svg.write('<text x="{:.3f}" y="{:.3f}" fill="{}" stroke="none" font-size="14">{}</text>\n'.format(ox+8,oy-8,reference_color,html.escape(name)))
+            svg.write('</g>\n')
+        svg.write('</svg>\n')
     return output_path
 
 
-def render_step_section_svg(
-    file_path,
-    output_path,
-    plane_origin,
-    plane_normal,
-    up_direction,
-    width=1600,
-    height=1000,
-    line_color="#000000",
-    fill_color="#D9D9D9",
-    background_color="#FFFFFF",
-    curve_samples=64,
-):
-    """Create a filled orthographic SVG of a true B-Rep planar section."""
-    from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeFace
-    from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
-    from OCC.Core.GeomAbs import GeomAbs_Line
-    from OCC.Core.gp import gp_Dir, gp_Pln, gp_Pnt
-
-    for value, name in ((line_color, "line_color"), (fill_color, "fill_color"), (background_color, "background_color")):
-        _validate_color(value, name)
-    normal = _normalize(list(plane_normal))
-    requested_up = _normalize(list(up_direction))
-    right_raw = _cross(normal, requested_up)
-    if math.sqrt(_dot(right_raw, right_raw)) < 1.0e-12:
-        raise ValueError("plane_normal and up_direction cannot be parallel")
-    right = _normalize(list(right_raw))
-    up = _normalize(list(_cross(right, normal)))
-    shape = _read_and_mesh_step(file_path, 1.0, 0.35)
-    plane = gp_Pln(gp_Pnt(*[float(v) for v in plane_origin]), gp_Dir(*normal))
-    plane_face = BRepBuilderAPI_MakeFace(plane).Face()
-    section = BRepAlgoAPI_Section(shape, plane_face, False)
-    section.Approximation(True)
-    section.Build()
+def render_step_section_svg(file_path, output_path, plane_origin, plane_normal, up_direction, width=1600, height=1000, line_color="#000000", fill_color="#D9D9D9", background_color="#FFFFFF", curve_samples=64):
+    normal = _normalize(plane_normal); up_req = _normalize(up_direction)
+    right = _normalize(_cross(normal, up_req)); up = _normalize(_cross(right, normal))
+    shape = _read_shape(file_path, 1.0, 0.35)
+    plane = gp_Pln(gp_Pnt(*[float(x) for x in plane_origin]), gp_Dir(*normal))
+    section = BRepAlgoAPI_Section(shape, BRepBuilderAPI_MakeFace(plane).Face(), False)
+    section.Approximation(True); section.Build()
     if not section.IsDone():
         raise RuntimeError("Open CASCADE section operation failed")
-    section_shape = section.Shape()
-    polylines = []
-    explorer = TopExp_Explorer(section_shape, TopAbs_EDGE)
-    while explorer.More():
-        edge = topods.Edge(explorer.Current())
-        adaptor = BRepAdaptor_Curve(edge)
-        first = adaptor.FirstParameter()
-        last = adaptor.LastParameter()
-        if math.isfinite(first) and math.isfinite(last) and abs(last - first) > 1e-14:
-            sample_count = 2 if adaptor.GetType() == GeomAbs_Line else curve_samples
-            points_2d = []
-            for parameter in np.linspace(first, last, sample_count):
-                point = adaptor.Value(float(parameter))
-                point_3d = (point.X(), point.Y(), point.Z())
-                points_2d.append((_dot(point_3d, right), _dot(point_3d, up)))
-            if len(points_2d) >= 2:
-                polylines.append(points_2d)
-        explorer.Next()
-    if not polylines:
-        raise RuntimeError("The section plane does not intersect the STEP model")
-    all_points = [point for polyline in polylines for point in polyline]
-    xmin = min(point[0] for point in all_points); xmax = max(point[0] for point in all_points)
-    ymin = min(point[1] for point in all_points); ymax = max(point[1] for point in all_points)
-    span_x = max(xmax - xmin, 1e-9); span_y = max(ymax - ymin, 1e-9)
-    margin = 40.0
-    scale = min((width - 2 * margin) / span_x, (height - 2 * margin) / span_y)
-    xoff = (width - span_x * scale) / 2.0
-    yoff = (height - span_y * scale) / 2.0
-    def image(point):
-        return (xoff + (point[0] - xmin) * scale, height - (yoff + (point[1] - ymin) * scale))
-    paths = []
-    for polyline in polylines:
-        converted = [image(point) for point in polyline]
-        command = "M " + " L ".join("{:.3f} {:.3f}".format(x, y) for x, y in converted)
-        if math.hypot(converted[0][0] - converted[-1][0], converted[0][1] - converted[-1][1]) < 2.0:
-            command += " Z"
+    polylines=[]; ex=TopExp_Explorer(section.Shape(),TopAbs_EDGE)
+    while ex.More():
+        adaptor=BRepAdaptor_Curve(topods.Edge(ex.Current())); first,last=adaptor.FirstParameter(),adaptor.LastParameter()
+        if math.isfinite(first) and math.isfinite(last) and abs(last-first)>1e-14:
+            n=2 if adaptor.GetType()==GeomAbs_Line else curve_samples
+            polylines.append([(_dot((adaptor.Value(float(t)).X(),adaptor.Value(float(t)).Y(),adaptor.Value(float(t)).Z()),right),_dot((adaptor.Value(float(t)).X(),adaptor.Value(float(t)).Y(),adaptor.Value(float(t)).Z()),up)) for t in np.linspace(first,last,n)])
+        ex.Next()
+    if not polylines: raise RuntimeError("The section plane does not intersect the STEP model")
+    pts=[p for line in polylines for p in line]; xmin=min(p[0] for p in pts); xmax=max(p[0] for p in pts); ymin=min(p[1] for p in pts); ymax=max(p[1] for p in pts)
+    sx=max(xmax-xmin,1e-9); sy=max(ymax-ymin,1e-9); margin=40; scale=min((width-2*margin)/sx,(height-2*margin)/sy); xoff=(width-sx*scale)/2; yoff=(height-sy*scale)/2
+    image=lambda p:(xoff+(p[0]-xmin)*scale,height-(yoff+(p[1]-ymin)*scale))
+    paths=[]
+    for line in polylines:
+        converted=[image(p) for p in line]; command="M "+" L ".join("{:.3f} {:.3f}".format(*p) for p in converted)
+        if math.hypot(converted[0][0]-converted[-1][0],converted[0][1]-converted[-1][1])<2: command+=" Z"
         paths.append(command)
-    with open(output_path, "w", encoding="utf-8") as svg:
-        svg.write('<?xml version="1.0" encoding="UTF-8"?>\n')
-        svg.write('<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">\n'.format(width, height, width, height))
-        svg.write('<rect width="{}" height="{}" fill="{}"/>\n'.format(width, height, background_color))
-        svg.write('<path d="{}" fill="{}" fill-rule="evenodd" stroke="{}" stroke-width="1.5"/>\n'.format(" ".join(paths), fill_color, line_color))
-        svg.write('</svg>\n')
+    with open(output_path,"w",encoding="utf-8") as svg:
+        svg.write('<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}"><rect width="{}" height="{}" fill="{}"/><path d="{}" fill="{}" fill-rule="evenodd" stroke="{}" stroke-width="1.5"/></svg>'.format(width,height,width,height,width,height,background_color," ".join(paths),fill_color,line_color))
     return output_path
